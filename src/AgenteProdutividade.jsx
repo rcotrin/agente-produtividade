@@ -5,14 +5,21 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
 } from 'recharts';
 
-// ─── palette ────────────────────────────────────────────────────────────────
+// ─── paleta Y Tecnologia ─────────────────────────────────────────────────────
 const C = {
-  bg: '#0d1117', surface: '#161b22', border: '#30363d',
-  primary: '#58a6ff', success: '#3fb950', warn: '#d29922',
-  danger: '#f85149', muted: '#8b949e', text: '#e6edf3',
-  purple: '#bc8cff', cyan: '#39d353', orange: '#f0883e',
+  bg: '#F9F9F9',       surface: '#FFFFFF',    border: '#E8ECF5',
+  accent: '#39ADE3',   navy: '#00366C',       navyMed: '#07447A',
+  cyanLight: '#87D5F6', sectionBg: '#E9F5FA',
+  green: '#166534',    amber: '#92400e',      coral: '#9a3412',
+  red: '#991b1b',      muted: '#94a3b8',
+  text: '#627C89',     textDim: '#74768B',    textBright: '#444762',
 };
-const CHART_COLORS = [C.primary, C.success, C.warn, C.danger, C.purple, C.cyan, C.orange, '#a5d6ff'];
+const CHART_COLORS = [C.accent, C.navy, C.navyMed, '#0284c7', C.green, C.amber, C.coral, C.cyanLight];
+
+const TYPE_COLOR = {
+  'Epic': C.navy, 'Feature': C.navyMed, 'User Story': C.accent,
+  'Task': '#0284c7', 'Bug': C.coral, 'Test Case': '#6366f1',
+};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function isWorkDay(d) {
@@ -41,8 +48,6 @@ function calcHorasUteis(inicio, fim, pausas = []) {
 
       if (segEnd > segStart) {
         let ms = segEnd - segStart;
-
-        // subtract pausa periods that overlap this segment
         for (const p of pausas) {
           const ps = new Date(p.inicio);
           const pe = new Date(p.fim);
@@ -105,7 +110,6 @@ async function azFetch(pat, url) {
   const res = await fetch(url, { headers: azHeaders(pat) });
   if (!res.ok) {
     const body = await res.text();
-    // strip HTML pages – keep only first 200 chars of plain-text errors
     const clean = body.startsWith('<') ? `recurso não encontrado (${url.split('?')[0]})` : body.slice(0, 200);
     throw new Error(`Azure DevOps ${res.status}: ${clean}`);
   }
@@ -118,7 +122,6 @@ async function fetchProjects(org, pat) {
 }
 
 async function fetchIterations(org, project, pat) {
-  // classificationnodes doesn't require team context — more reliable than teamsettings
   const data = await azFetch(pat, `/devops/${org}/${project}/_apis/wit/classificationnodes/Iterations?$depth=10&api-version=7.1`);
   const nodes = [];
   function flatten(node) {
@@ -192,54 +195,42 @@ async function fetchUpdates(org, project, pat, id) {
 }
 
 // ─── sub-components ───────────────────────────────────────────────────────────
-function KpiCard({ label, value, sub, color = C.primary }) {
+function KpiCard({ label, value, sub, color = C.accent }) {
   return (
-    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: '16px 20px', minWidth: 140 }}>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 700, color }}>{value}</div>
+    <div className="kpi-card">
+      <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 800, color, fontFamily: "'Manrope',sans-serif", letterSpacing: '-0.01em' }}>{value}</div>
       {sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{sub}</div>}
-    </div>
-  );
-}
-
-function Section({ title, children }) {
-  return (
-    <div style={{ marginBottom: 32 }}>
-      <h2 style={{ fontSize: 15, fontWeight: 600, color: C.muted, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1 }}>{title}</h2>
-      {children}
     </div>
   );
 }
 
 function Tag({ children, color = C.muted }) {
   return (
-    <span style={{ background: `${color}22`, color, border: `1px solid ${color}55`, borderRadius: 4, padding: '2px 6px', fontSize: 11, fontWeight: 600 }}>
+    <span className="badge" style={{ background: `${color}18`, color, border: `1px solid ${color}40` }}>
       {children}
     </span>
   );
 }
 
-const TYPE_COLOR = {
-  'Epic': C.purple, 'Feature': C.primary, 'User Story': C.success,
-  'Task': C.cyan, 'Bug': C.danger, 'Test Case': C.orange,
-};
-
 function stateColor(s) {
   if (!s) return C.muted;
   const l = s.toLowerCase();
-  if (l.includes('done') || l.includes('closed') || l.includes('resolved')) return C.success;
-  if (l.includes('active') || l.includes('progress')) return C.primary;
-  if (l.includes('blocked') || l.includes('pausa')) return C.danger;
-  return C.warn;
+  if (l.includes('done') || l.includes('closed') || l.includes('resolved')) return C.green;
+  if (l.includes('active') || l.includes('progress')) return C.accent;
+  if (l.includes('blocked') || l.includes('pausa')) return C.coral;
+  return C.amber;
 }
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
-    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 6, padding: '8px 12px', fontSize: 12 }}>
-      {label && <div style={{ color: C.muted, marginBottom: 4 }}>{label}</div>}
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: '8px 14px', fontSize: 12, boxShadow: '0 2px 8px #00366C0e' }}>
+      {label && <div style={{ color: C.textDim, marginBottom: 4, fontWeight: 600 }}>{label}</div>}
       {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color || C.text }}>{p.name}: <strong>{typeof p.value === 'number' ? p.value.toFixed(1) : p.value}</strong></div>
+        <div key={i} style={{ color: p.color || C.textBright }}>
+          {p.name}: <strong>{typeof p.value === 'number' ? p.value.toFixed(1) : p.value}</strong>
+        </div>
       ))}
     </div>
   );
@@ -247,29 +238,24 @@ const CustomTooltip = ({ active, payload, label }) => {
 
 // ─── main component ───────────────────────────────────────────────────────────
 export default function AgenteProdutividade() {
-  // credentials / config
   const [azOrg, setAzOrg] = useState('');
   const [azProject, setAzProject] = useState('');
   const [azPat, setAzPat] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
 
-  // remote data
   const [projects, setProjects] = useState([]);
   const [iterations, setIterations] = useState([]);
   const [members, setMembers] = useState([]);
 
-  // filters
   const [filterDateFrom, setFilterDateFrom] = useState('');
   const [filterDateTo, setFilterDateTo] = useState('');
   const [filterIteration, setFilterIteration] = useState('');
   const [filterMember, setFilterMember] = useState('');
 
-  // work data
   const [workItems, setWorkItems] = useState([]);
-  const [updatesMap, setUpdatesMap] = useState({}); // id → updates[]
-  const [metricsMap, setMetricsMap] = useState({}); // id → {leadTime, cycleTime, horasUteis, pausas, interacoes, boardTimes}
+  const [updatesMap, setUpdatesMap] = useState({});
+  const [metricsMap, setMetricsMap] = useState({});
 
-  // ui
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
   const [error, setError] = useState('');
@@ -278,7 +264,7 @@ export default function AgenteProdutividade() {
   const [aiLoading, setAiLoading] = useState(false);
   const [configOpen, setConfigOpen] = useState(true);
 
-  // ── connect: load projects/iters/members ───────────────────────────────────
+  // ── connect ────────────────────────────────────────────────────────────────
   const handleConnect = useCallback(async () => {
     if (!azOrg || !azPat) return setError('Informe organização e PAT.');
     setError(''); setLoading(true); setLoadingMsg('Conectando ao Azure DevOps…');
@@ -305,12 +291,12 @@ export default function AgenteProdutividade() {
     setAzProject(proj);
     if (!azOrg || !azPat || !proj) return;
     try {
-      const [iters, mems] = await Promise.all([
+      const [iters, mems] = await Promise.allSettled([
         fetchIterations(azOrg, proj, azPat),
         fetchTeamMembers(azOrg, proj, azPat),
       ]);
-      setIterations(iters);
-      setMembers(mems);
+      if (iters.status === 'fulfilled') setIterations(iters.value);
+      if (mems.status === 'fulfilled') setMembers(mems.value);
     } catch { /* ignore */ }
   }, [azOrg, azPat]);
 
@@ -338,42 +324,27 @@ export default function AgenteProdutividade() {
         try { updates = await fetchUpdates(azOrg, azProject, azPat, id); } catch { /* skip */ }
         uMap[id] = updates;
 
-        // board column times
         const boardTimes = {};
         let prevCol = null, prevTs = null;
         for (const u of updates) {
           const col = u.fields?.['System.BoardColumn']?.newValue;
           const ts = u.revisedDate || u.fields?.['System.ChangedDate']?.newValue;
           if (col && ts) {
-            if (prevCol && prevTs) {
-              boardTimes[prevCol] = (boardTimes[prevCol] || 0) + calcHorasUteis(prevTs, ts);
-            }
+            if (prevCol && prevTs) boardTimes[prevCol] = (boardTimes[prevCol] || 0) + calcHorasUteis(prevTs, ts);
             prevCol = col; prevTs = ts;
           }
         }
-        if (prevCol && prevTs) {
-          boardTimes[prevCol] = (boardTimes[prevCol] || 0) + calcHorasUteis(prevTs, new Date().toISOString());
-        }
+        if (prevCol && prevTs) boardTimes[prevCol] = (boardTimes[prevCol] || 0) + calcHorasUteis(prevTs, new Date().toISOString());
 
-        // pausa periods
         const pausas = extrairPausas(updates);
-
-        // dates
         const createdDate = wi.fields?.['System.CreatedDate'];
         const activatedDate = wi.fields?.['Microsoft.VSTS.Common.ActivatedDate'];
         const closedDate = wi.fields?.['Microsoft.VSTS.Common.ClosedDate'] || wi.fields?.['Microsoft.VSTS.Common.ResolvedDate'];
 
-        // lead time = created → closed (business hours)
         const leadTime = calcHorasUteis(createdDate, closedDate, pausas);
-        // cycle time = activated → closed (business hours)
         const cycleTime = calcHorasUteis(activatedDate, closedDate, pausas);
-        // horas úteis total = created → now or closed
         const horasUteis = calcHorasUteis(createdDate, closedDate || new Date().toISOString(), pausas);
-
-        // interaction count = number of meaningful updates (comments, state changes, assignments)
-        const interacoes = updates.filter(u =>
-          u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef
-        ).length;
+        const interacoes = updates.filter(u => u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef).length;
 
         mMap[id] = { leadTime, cycleTime, horasUteis, pausas, interacoes, boardTimes };
       }
@@ -397,31 +368,26 @@ export default function AgenteProdutividade() {
       return s === 'done' || s === 'closed' || s === 'resolved';
     }).length;
 
-    // hours per person
     const hoursByPerson = {};
+    const hoursByType = {};
+    const boardTotals = {};
+    const interByPerson = {};
+
     for (const wi of workItems) {
       const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
-      const h = metricsMap[wi.id]?.horasUteis || 0;
-      hoursByPerson[name] = (hoursByPerson[name] || 0) + h;
-    }
-
-    // hours by type
-    const hoursByType = {};
-    for (const wi of workItems) {
       const type = wi.fields?.['System.WorkItemType'] || 'Outro';
       const h = metricsMap[wi.id]?.horasUteis || 0;
+      hoursByPerson[name] = (hoursByPerson[name] || 0) + h;
       hoursByType[type] = (hoursByType[type] || 0) + h;
+      interByPerson[name] = (interByPerson[name] || 0) + (metricsMap[wi.id]?.interacoes || 0);
     }
 
-    // board column aggregates
-    const boardTotals = {};
     for (const m of Object.values(metricsMap)) {
       for (const [col, h] of Object.entries(m.boardTimes || {})) {
         boardTotals[col] = (boardTotals[col] || 0) + h;
       }
     }
 
-    // lead/cycle scatter
     const scatter = workItems
       .filter(w => metricsMap[w.id]?.leadTime > 0)
       .map(w => ({
@@ -432,21 +398,11 @@ export default function AgenteProdutividade() {
         interacoes: metricsMap[w.id]?.interacoes || 0,
       }));
 
-    // radar: interactions per person
-    const interByPerson = {};
-    for (const wi of workItems) {
-      const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
-      interByPerson[name] = (interByPerson[name] || 0) + (metricsMap[wi.id]?.interacoes || 0);
-    }
-
     const totalHours = Object.values(hoursByPerson).reduce((a, b) => a + b, 0);
     const avgLeadTime = scatter.length ? scatter.reduce((a, s) => a + s.leadTime, 0) / scatter.length : 0;
     const avgCycleTime = scatter.length ? scatter.reduce((a, s) => a + s.cycleTime, 0) / scatter.length : 0;
 
-    return {
-      totalItems, completedItems, totalHours, avgLeadTime, avgCycleTime,
-      hoursByPerson, hoursByType, boardTotals, scatter, interByPerson,
-    };
+    return { totalItems, completedItems, totalHours, avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, boardTotals, scatter, interByPerson };
   }, [workItems, metricsMap]);
 
   // ── AI analysis ────────────────────────────────────────────────────────────
@@ -493,102 +449,128 @@ export default function AgenteProdutividade() {
     const { jsPDF } = await import('jspdf');
     const el = document.getElementById('relatorio-pdf');
     if (!el) return;
-    const canvas = await html2canvas(el, { scale: 1.5, backgroundColor: '#0d1117', useCORS: true });
+    const canvas = await html2canvas(el, { scale: 1.5, backgroundColor: '#F9F9F9', useCORS: true });
     const img = canvas.toDataURL('image/png');
     const pdf = new jsPDF({ orientation: 'landscape', unit: 'px', format: [canvas.width / 1.5, canvas.height / 1.5] });
     pdf.addImage(img, 'PNG', 0, 0, canvas.width / 1.5, canvas.height / 1.5);
     pdf.save(`produtividade-${azProject}-${new Date().toISOString().slice(0, 10)}.pdf`);
   }, [azProject]);
 
-  // ── render ────────────────────────────────────────────────────────────────
-  const sx = {
-    wrap: { minHeight: '100vh', background: C.bg, color: C.text, fontFamily: 'inherit' },
-    header: { background: C.surface, borderBottom: `1px solid ${C.border}`, padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 12 },
-    main: { maxWidth: 1400, margin: '0 auto', padding: '24px 24px' },
-    card: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 20, marginBottom: 20 },
-    input: { background: '#010409', border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: '6px 10px', fontSize: 13, width: '100%' },
-    btn: (col = C.primary) => ({ background: col, color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 }),
-    btnOutline: { background: 'transparent', border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13 },
-    label: { fontSize: 12, color: C.muted, display: 'block', marginBottom: 4 },
-    row: { display: 'flex', gap: 12, flexWrap: 'wrap' },
-    tabs: { display: 'flex', gap: 2, borderBottom: `1px solid ${C.border}`, marginBottom: 24 },
-  };
-
-  const tabBtn = (key, label) => (
-    <button
-      onClick={() => setTab(key)}
-      style={{ ...sx.btnOutline, borderBottom: tab === key ? `2px solid ${C.primary}` : '2px solid transparent', color: tab === key ? C.primary : C.muted, borderRadius: '6px 6px 0 0', borderLeft: 'none', borderRight: 'none', borderTop: 'none' }}
-    >
-      {label}
-    </button>
-  );
+  // ── render ─────────────────────────────────────────────────────────────────
+  const tabActive = key => tab === key;
 
   return (
-    <div style={sx.wrap}>
-      {/* header */}
-      <div style={sx.header}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>⚡ Agente de Produtividade</div>
+    <div style={{ fontFamily: "'Roboto','system-ui',sans-serif", background: C.bg, minHeight: '100vh', color: C.text }}>
+      {/* Google Fonts */}
+      <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
+
+      <style>{`
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #F9F9F9; }
+        ::-webkit-scrollbar-thumb { background: #E8ECF5; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #87D5F6; }
+        .kpi-card { background: #FFFFFF; border: 1px solid #E8ECF5; border-radius: 8px; padding: 16px 22px; min-width: 150px; flex: 1; }
+        .section-card { background: #FFFFFF; border: 1px solid #E8ECF5; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+        .section-card h4 { font-size: 12px; font-weight: 700; color: #74768B; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .badge { font-size: 10px; padding: 2px 8px; border-radius: 20px; font-weight: 600; letter-spacing: .03em; flex-shrink: 0; }
+        .ap-input { background: #FFFFFF; border: 1px solid #E8ECF5; border-radius: 6px; color: #444762; padding: 7px 10px; font-size: 13px; width: 100%; font-family: inherit; transition: border-color .15s, box-shadow .15s; }
+        .ap-input:focus { outline: none; border-color: #39ADE3; box-shadow: 0 0 0 3px #39ADE314; }
+        .ap-btn { border: none; border-radius: 6px; padding: 8px 18px; cursor: pointer; font-weight: 600; font-size: 13px; font-family: inherit; transition: opacity .15s; }
+        .ap-btn:disabled { opacity: .45; cursor: default; }
+        .ap-btn:hover:not(:disabled) { opacity: .88; }
+        .ap-btn-outline { background: transparent; border: 1px solid #E8ECF5; border-radius: 6px; color: #74768B; padding: 7px 14px; cursor: pointer; font-size: 13px; font-family: inherit; transition: border-color .15s, color .15s; }
+        .ap-btn-outline:hover { border-color: #39ADE3; color: #39ADE3; }
+        .tab-btn { background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; font-family: inherit; padding: 8px 14px; margin-bottom: -1px; font-size: 13px; font-weight: 600; color: #74768B; transition: all .15s; }
+        .tab-btn.active { border-bottom-color: #39ADE3; color: #39ADE3; }
+        .tab-btn:hover:not(.active) { color: #444762; border-bottom-color: #E8ECF5; }
+        .wi-row { transition: background .12s; }
+        .wi-row:hover { background: #E9F5FA; }
+        @keyframes shimmer { 0%,100%{opacity:.4} 50%{opacity:1} }
+      `}</style>
+
+      {/* ── header ── */}
+      <div style={{ background: '#FFFFFF', borderBottom: '1px solid #E8ECF5', padding: '14px 28px', display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 2px 8px #00366C0e' }}>
+        <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'linear-gradient(135deg, #00366C, #39ADE3)', flexShrink: 0 }} />
+        <span style={{ fontFamily: "'Manrope',sans-serif", fontWeight: 800, fontSize: 18, background: 'linear-gradient(30deg, #00366C 0%, #39ADE3 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text', letterSpacing: '-0.01em' }}>
+          Agente de Produtividade
+        </span>
+        {azProject && (
+          <>
+            <span style={{ color: '#E8ECF5', fontSize: 18, margin: '0 2px' }}>│</span>
+            <span style={{ fontFamily: "'Manrope',sans-serif", fontWeight: 700, fontSize: 14, color: C.accent }}>{azProject}</span>
+          </>
+        )}
         <div style={{ flex: 1 }} />
-        <button onClick={() => setConfigOpen(o => !o)} style={sx.btnOutline}>⚙ Configuração</button>
-        {metrics && <button onClick={handleExportPdf} style={sx.btn(C.warn)}>↓ PDF</button>}
+        {metrics && (
+          <button className="ap-btn" style={{ background: C.amber, color: '#fff' }} onClick={handleExportPdf}>
+            ↓ Exportar PDF
+          </button>
+        )}
+        <button className="ap-btn-outline" onClick={() => setConfigOpen(o => !o)}>
+          ⚙ Configuração
+        </button>
       </div>
 
-      <div style={sx.main}>
-        {/* config panel */}
+      <div style={{ maxWidth: 1440, margin: '0 auto', padding: '24px 28px' }}>
+
+        {/* ── config panel ── */}
         {configOpen && (
-          <div style={sx.card}>
-            <h3 style={{ marginBottom: 16, fontWeight: 600 }}>Configuração</h3>
-            <div style={{ ...sx.row, marginBottom: 12 }}>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Organização Azure DevOps</label>
-                <input style={sx.input} placeholder="ex: minha-org" value={azOrg} onChange={e => setAzOrg(e.target.value)} />
+          <div className="section-card" style={{ marginBottom: 24 }}>
+            <h4 style={{ fontSize: 12, fontWeight: 700, color: C.textDim, marginBottom: 16, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Configuração</h4>
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Organização Azure DevOps</label>
+                <input className="ap-input" placeholder="ex: minha-org" value={azOrg} onChange={e => setAzOrg(e.target.value)} />
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>PAT (Personal Access Token)</label>
-                <input style={sx.input} type="password" placeholder="Token com permissão de leitura" value={azPat} onChange={e => setAzPat(e.target.value)} />
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>PAT (Personal Access Token)</label>
+                <input className="ap-input" type="password" placeholder="Token com permissão de leitura" value={azPat} onChange={e => setAzPat(e.target.value)} />
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Chave Anthropic (Claude Haiku)</label>
-                <input style={sx.input} type="password" placeholder="sk-ant-..." value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} />
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Chave Anthropic (Claude Haiku)</label>
+                <input className="ap-input" type="password" placeholder="sk-ant-..." value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} />
               </div>
               <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-                <button onClick={handleConnect} style={sx.btn()} disabled={loading}>
+                <button className="ap-btn" style={{ background: C.navy, color: '#fff' }} onClick={handleConnect} disabled={loading}>
                   {loading && loadingMsg.startsWith('Conectando') ? 'Conectando…' : 'Conectar'}
                 </button>
               </div>
             </div>
-            <div style={sx.row}>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Projeto</label>
-                <select style={sx.input} value={azProject} onChange={e => handleProjectChange(e.target.value)}>
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 160 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Projeto</label>
+                <select className="ap-input" value={azProject} onChange={e => handleProjectChange(e.target.value)}>
                   <option value="">Selecione o projeto</option>
                   {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
                 </select>
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Sprint / Iteração</label>
-                <select style={sx.input} value={filterIteration} onChange={e => setFilterIteration(e.target.value)}>
+              <div style={{ flex: 1, minWidth: 160 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Sprint / Iteração</label>
+                <select className="ap-input" value={filterIteration} onChange={e => setFilterIteration(e.target.value)}>
                   <option value="">Todas as iterações</option>
                   {iterations.map(it => <option key={it.id} value={it.path}>{it.name}</option>)}
                 </select>
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Profissional</label>
-                <select style={sx.input} value={filterMember} onChange={e => setFilterMember(e.target.value)}>
+              <div style={{ flex: 1, minWidth: 160 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Profissional</label>
+                <select className="ap-input" value={filterMember} onChange={e => setFilterMember(e.target.value)}>
                   <option value="">Todos</option>
                   {members.map(m => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Data de</label>
-                <input type="date" style={sx.input} value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} />
+              <div style={{ flex: 1, minWidth: 130 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data de</label>
+                <input type="date" className="ap-input" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} />
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={sx.label}>Data até</label>
-                <input type="date" style={sx.input} value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} />
+              <div style={{ flex: 1, minWidth: 130 }}>
+                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data até</label>
+                <input type="date" className="ap-input" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} />
               </div>
               <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-                <button onClick={handleFetch} style={sx.btn(C.success)} disabled={loading || !azProject}>
+                <button className="ap-btn" style={{ background: C.accent, color: '#fff' }} onClick={handleFetch} disabled={loading || !azProject}>
                   {loading ? loadingMsg || 'Carregando…' : '⟳ Buscar Dados'}
                 </button>
               </div>
@@ -596,135 +578,142 @@ export default function AgenteProdutividade() {
           </div>
         )}
 
-        {error && <div style={{ background: `${C.danger}22`, border: `1px solid ${C.danger}`, borderRadius: 6, padding: '10px 14px', color: C.danger, marginBottom: 16, fontSize: 13 }}>{error}</div>}
+        {/* error */}
+        {error && (
+          <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 6, padding: '10px 14px', color: C.red, marginBottom: 16, fontSize: 13 }}>
+            {error}
+          </div>
+        )}
 
+        {/* loading bar */}
         {loading && (
-          <div style={{ textAlign: 'center', color: C.muted, padding: 40 }}>
-            <div style={{ fontSize: 13 }}>{loadingMsg}</div>
-            <div style={{ marginTop: 8, height: 2, background: C.border, borderRadius: 1, overflow: 'hidden' }}>
-              <div style={{ height: '100%', background: C.primary, width: '60%', animation: 'pulse 1.5s ease-in-out infinite' }} />
+          <div style={{ background: '#FFFFFF', border: '1px solid #E8ECF5', borderRadius: 8, padding: '24px 28px', textAlign: 'center', marginBottom: 20 }}>
+            <div style={{ fontSize: 13, color: C.textDim, marginBottom: 10 }}>{loadingMsg}</div>
+            <div style={{ height: 3, background: '#E8ECF5', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{ height: '100%', background: `linear-gradient(90deg, ${C.navy}aa, ${C.accent})`, width: '60%', animation: 'shimmer 1.5s ease-in-out infinite', borderRadius: 2 }} />
             </div>
           </div>
         )}
 
+        {/* ── data area ── */}
         {metrics && !loading && (
           <div id="relatorio-pdf">
+
             {/* KPI strip */}
-            <div style={{ ...sx.row, marginBottom: 24 }}>
-              <KpiCard label="Work Items" value={metrics.totalItems} sub={`${metrics.completedItems} concluídos`} />
-              <KpiCard label="Horas Úteis Totais" value={horasToStr(metrics.totalHours)} color={C.success} />
-              <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.warn} />
-              <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.primary} />
-              <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.danger} />
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 }}>
+              <KpiCard label="Work Items" value={metrics.totalItems} sub={`${metrics.completedItems} concluídos`} color={C.navy} />
+              <KpiCard label="Horas Úteis Totais" value={horasToStr(metrics.totalHours)} color={C.accent} />
+              <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.amber} />
+              <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.navyMed} />
+              <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.coral} />
             </div>
 
             {/* tabs */}
-            <div style={sx.tabs}>
-              {tabBtn('dashboard', 'Dashboard')}
-              {tabBtn('board', 'Board & Fluxo')}
-              {tabBtn('items', 'Work Items')}
-              {tabBtn('ai', 'Análise IA')}
+            <div style={{ display: 'flex', borderBottom: '1px solid #E8ECF5', marginBottom: 24 }}>
+              {['dashboard', 'board', 'items', 'ai'].map((key, _, arr) => {
+                const labels = { dashboard: 'Dashboard', board: 'Board & Fluxo', items: 'Work Items', ai: 'Análise IA' };
+                return (
+                  <button key={key} className={`tab-btn${tabActive(key) ? ' active' : ''}`} onClick={() => setTab(key)}>
+                    {labels[key]}
+                  </button>
+                );
+              })}
             </div>
 
-            {/* dashboard tab */}
+            {/* ── Dashboard ── */}
             {tab === 'dashboard' && (
-              <div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-                  {/* horas por pessoa */}
-                  <div style={sx.card}>
-                    <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Horas Úteis por Profissional</h4>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <BarChart data={Object.entries(metrics.hoursByPerson).map(([name, h]) => ({ name: name.split(' ')[0], horas: +h.toFixed(1) }))}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                        <XAxis dataKey="name" tick={{ fill: C.muted, fontSize: 11 }} />
-                        <YAxis tick={{ fill: C.muted, fontSize: 11 }} />
-                        <Tooltip content={<CustomTooltip />} />
-                        <Bar dataKey="horas" fill={C.primary} radius={[4, 4, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
 
-                  {/* horas por tipo */}
-                  <div style={sx.card}>
-                    <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Distribuição por Tipo</h4>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <PieChart>
-                        <Pie
-                          data={Object.entries(metrics.hoursByType).map(([name, value]) => ({ name, value: +value.toFixed(1) }))}
-                          cx="50%" cy="50%" innerRadius={60} outerRadius={100}
-                          dataKey="value" nameKey="name"
-                        >
-                          {Object.keys(metrics.hoursByType).map((k, i) => (
-                            <Cell key={k} fill={TYPE_COLOR[k] || CHART_COLORS[i % CHART_COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip content={<CustomTooltip />} />
-                        <Legend wrapperStyle={{ fontSize: 11, color: C.muted }} />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {/* lead time vs cycle time scatter */}
-                  <div style={sx.card}>
-                    <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Lead Time vs. Cycle Time (h)</h4>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <ScatterChart>
-                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                        <XAxis dataKey="leadTime" name="Lead Time" type="number" tick={{ fill: C.muted, fontSize: 11 }} label={{ value: 'Lead Time (h)', fill: C.muted, fontSize: 11, position: 'insideBottom', offset: -4 }} />
-                        <YAxis dataKey="cycleTime" name="Cycle Time" type="number" tick={{ fill: C.muted, fontSize: 11 }} label={{ value: 'Cycle Time (h)', fill: C.muted, fontSize: 11, angle: -90, position: 'insideLeft' }} />
-                        <ZAxis dataKey="interacoes" range={[40, 200]} name="Interações" />
-                        <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<CustomTooltip />} />
-                        <Scatter data={metrics.scatter} fill={C.primary} opacity={0.7} />
-                      </ScatterChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {/* interactions radar */}
-                  <div style={sx.card}>
-                    <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Índice de Interação por Profissional</h4>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <RadarChart data={Object.entries(metrics.interByPerson).map(([name, v]) => ({ name: name.split(' ')[0], interacoes: v }))}>
-                        <PolarGrid stroke={C.border} />
-                        <PolarAngleAxis dataKey="name" tick={{ fill: C.muted, fontSize: 11 }} />
-                        <PolarRadiusAxis tick={{ fill: C.muted, fontSize: 9 }} />
-                        <Radar name="Interações" dataKey="interacoes" stroke={C.purple} fill={C.purple} fillOpacity={0.3} />
-                        <Tooltip content={<CustomTooltip />} />
-                      </RadarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* board tab */}
-            {tab === 'board' && (
-              <div>
-                <div style={sx.card}>
-                  <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Tempo Médio por Coluna do Board (h)</h4>
-                  <ResponsiveContainer width="100%" height={320}>
-                    <BarChart
-                      data={Object.entries(metrics.boardTotals)
-                        .sort((a, b) => b[1] - a[1])
-                        .map(([col, h]) => ({ col, horas: +h.toFixed(1) }))}
-                      layout="vertical"
-                    >
+                <div className="section-card">
+                  <h4>Horas Úteis por Profissional</h4>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <BarChart data={Object.entries(metrics.hoursByPerson).map(([name, h]) => ({ name: name.split(' ')[0], horas: +h.toFixed(1) }))}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                      <XAxis type="number" tick={{ fill: C.muted, fontSize: 11 }} />
-                      <YAxis dataKey="col" type="category" width={140} tick={{ fill: C.muted, fontSize: 11 }} />
+                      <XAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <YAxis tick={{ fill: C.textDim, fontSize: 11 }} />
                       <Tooltip content={<CustomTooltip />} />
-                      <Bar dataKey="horas" fill={C.cyan} radius={[0, 4, 4, 0]} />
+                      <Bar dataKey="horas" name="Horas" fill={C.accent} radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
 
-                <div style={sx.card}>
-                  <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Indicador de Interação por Card</h4>
+                <div className="section-card">
+                  <h4>Distribuição por Tipo</h4>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <PieChart>
+                      <Pie
+                        data={Object.entries(metrics.hoursByType).map(([name, value]) => ({ name, value: +value.toFixed(1) }))}
+                        cx="50%" cy="50%" innerRadius={60} outerRadius={100}
+                        dataKey="value" nameKey="name"
+                      >
+                        {Object.keys(metrics.hoursByType).map((k, i) => (
+                          <Cell key={k} fill={TYPE_COLOR[k] || CHART_COLORS[i % CHART_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip content={<CustomTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: 11, color: C.textDim }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="section-card">
+                  <h4>Lead Time vs. Cycle Time (h)</h4>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <ScatterChart>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                      <XAxis dataKey="leadTime" name="Lead Time" type="number" tick={{ fill: C.textDim, fontSize: 11 }}
+                        label={{ value: 'Lead Time (h)', fill: C.textDim, fontSize: 11, position: 'insideBottom', offset: -4 }} />
+                      <YAxis dataKey="cycleTime" name="Cycle Time" type="number" tick={{ fill: C.textDim, fontSize: 11 }}
+                        label={{ value: 'Cycle Time (h)', fill: C.textDim, fontSize: 11, angle: -90, position: 'insideLeft' }} />
+                      <ZAxis dataKey="interacoes" range={[40, 200]} name="Interações" />
+                      <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<CustomTooltip />} />
+                      <Scatter data={metrics.scatter} fill={C.navy} opacity={0.65} />
+                    </ScatterChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="section-card">
+                  <h4>Índice de Interação por Profissional</h4>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <RadarChart data={Object.entries(metrics.interByPerson).map(([name, v]) => ({ name: name.split(' ')[0], interacoes: v }))}>
+                      <PolarGrid stroke={C.border} />
+                      <PolarAngleAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <PolarRadiusAxis tick={{ fill: C.muted, fontSize: 9 }} />
+                      <Radar name="Interações" dataKey="interacoes" stroke={C.accent} fill={C.accent} fillOpacity={0.2} />
+                      <Tooltip content={<CustomTooltip />} />
+                    </RadarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {/* ── Board & Fluxo ── */}
+            {tab === 'board' && (
+              <div>
+                <div className="section-card">
+                  <h4>Tempo Total por Coluna do Board (h)</h4>
+                  <ResponsiveContainer width="100%" height={320}>
+                    <BarChart
+                      data={Object.entries(metrics.boardTotals).sort((a, b) => b[1] - a[1]).map(([col, h]) => ({ col, horas: +h.toFixed(1) }))}
+                      layout="vertical"
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                      <XAxis type="number" tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <YAxis dataKey="col" type="category" width={150} tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <Tooltip content={<CustomTooltip />} />
+                      <Bar dataKey="horas" name="Horas" fill={C.navyMed} radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="section-card">
+                  <h4>Indicador de Interação por Card</h4>
                   <div style={{ overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                       <thead>
-                        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <tr style={{ background: C.sectionBg }}>
                           {['ID', 'Título', 'Tipo', 'Responsável', 'Interações', 'Pausas', 'Lead Time'].map(h => (
-                            <th key={h} style={{ padding: '8px 10px', textAlign: 'left', color: C.muted, fontWeight: 500 }}>{h}</th>
+                            <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                           ))}
                         </tr>
                       </thead>
@@ -735,18 +724,16 @@ export default function AgenteProdutividade() {
                           .map(wi => {
                             const m = metricsMap[wi.id] || {};
                             return (
-                              <tr key={wi.id} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                                <td style={{ padding: '7px 10px', color: C.muted }}>{wi.id}</td>
-                                <td style={{ padding: '7px 10px' }}>{(wi.fields?.['System.Title'] || '').slice(0, 50)}</td>
-                                <td style={{ padding: '7px 10px' }}>
-                                  <Tag color={TYPE_COLOR[wi.fields?.['System.WorkItemType']] || C.muted}>
-                                    {wi.fields?.['System.WorkItemType']}
-                                  </Tag>
+                              <tr key={wi.id} className="wi-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                                <td style={{ padding: '7px 12px', color: C.muted, fontWeight: 600 }}>{wi.id}</td>
+                                <td style={{ padding: '7px 12px', color: C.textBright }}>{(wi.fields?.['System.Title'] || '').slice(0, 50)}</td>
+                                <td style={{ padding: '7px 12px' }}>
+                                  <Tag color={TYPE_COLOR[wi.fields?.['System.WorkItemType']] || C.muted}>{wi.fields?.['System.WorkItemType']}</Tag>
                                 </td>
-                                <td style={{ padding: '7px 10px' }}>{wi.fields?.['System.AssignedTo']?.displayName?.split(' ')[0] || '—'}</td>
-                                <td style={{ padding: '7px 10px', color: m.interacoes > 10 ? C.warn : C.text }}>{m.interacoes || 0}</td>
-                                <td style={{ padding: '7px 10px', color: m.pausas?.length > 0 ? C.danger : C.muted }}>{m.pausas?.length || 0}</td>
-                                <td style={{ padding: '7px 10px' }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
+                                <td style={{ padding: '7px 12px', color: C.text }}>{wi.fields?.['System.AssignedTo']?.displayName?.split(' ')[0] || '—'}</td>
+                                <td style={{ padding: '7px 12px', color: m.interacoes > 10 ? C.amber : C.textBright, fontWeight: m.interacoes > 10 ? 700 : 400 }}>{m.interacoes || 0}</td>
+                                <td style={{ padding: '7px 12px', color: m.pausas?.length > 0 ? C.coral : C.muted }}>{m.pausas?.length || 0}</td>
+                                <td style={{ padding: '7px 12px', color: C.text }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
                               </tr>
                             );
                           })}
@@ -757,16 +744,16 @@ export default function AgenteProdutividade() {
               </div>
             )}
 
-            {/* items tab */}
+            {/* ── Work Items ── */}
             {tab === 'items' && (
-              <div style={sx.card}>
-                <h4 style={{ marginBottom: 12, fontSize: 13, color: C.muted }}>Work Items ({workItems.length})</h4>
+              <div className="section-card">
+                <h4>Work Items ({workItems.length})</h4>
                 <div style={{ overflowX: 'auto' }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
-                      <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <tr style={{ background: C.sectionBg }}>
                         {['ID', 'Título', 'Tipo', 'Estado', 'Responsável', 'Criado', 'Fechado', 'Lead Time', 'Cycle Time', 'Horas Úteis'].map(h => (
-                          <th key={h} style={{ padding: '8px 10px', textAlign: 'left', color: C.muted, fontWeight: 500, whiteSpace: 'nowrap' }}>{h}</th>
+                          <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -775,23 +762,21 @@ export default function AgenteProdutividade() {
                         const m = metricsMap[wi.id] || {};
                         const state = wi.fields?.['System.State'] || '';
                         return (
-                          <tr key={wi.id} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                            <td style={{ padding: '7px 10px', color: C.muted }}>{wi.id}</td>
-                            <td style={{ padding: '7px 10px', maxWidth: 240 }}>{(wi.fields?.['System.Title'] || '').slice(0, 50)}</td>
-                            <td style={{ padding: '7px 10px' }}>
-                              <Tag color={TYPE_COLOR[wi.fields?.['System.WorkItemType']] || C.muted}>
-                                {wi.fields?.['System.WorkItemType']}
-                              </Tag>
+                          <tr key={wi.id} className="wi-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <td style={{ padding: '7px 12px', color: C.muted, fontWeight: 600 }}>{wi.id}</td>
+                            <td style={{ padding: '7px 12px', maxWidth: 260, color: C.textBright }}>{(wi.fields?.['System.Title'] || '').slice(0, 55)}</td>
+                            <td style={{ padding: '7px 12px' }}>
+                              <Tag color={TYPE_COLOR[wi.fields?.['System.WorkItemType']] || C.muted}>{wi.fields?.['System.WorkItemType']}</Tag>
                             </td>
-                            <td style={{ padding: '7px 10px' }}>
+                            <td style={{ padding: '7px 12px' }}>
                               <Tag color={stateColor(state)}>{state}</Tag>
                             </td>
-                            <td style={{ padding: '7px 10px' }}>{wi.fields?.['System.AssignedTo']?.displayName || '—'}</td>
-                            <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['System.CreatedDate'])}</td>
-                            <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['Microsoft.VSTS.Common.ClosedDate'])}</td>
-                            <td style={{ padding: '7px 10px' }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
-                            <td style={{ padding: '7px 10px' }}>{m.cycleTime > 0 ? horasToStr(m.cycleTime) : '—'}</td>
-                            <td style={{ padding: '7px 10px' }}>{m.horasUteis > 0 ? horasToStr(m.horasUteis) : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{wi.fields?.['System.AssignedTo']?.displayName || '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.muted, whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['System.CreatedDate'])}</td>
+                            <td style={{ padding: '7px 12px', color: C.muted, whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['Microsoft.VSTS.Common.ClosedDate'])}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{m.cycleTime > 0 ? horasToStr(m.cycleTime) : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{m.horasUteis > 0 ? horasToStr(m.horasUteis) : '—'}</td>
                           </tr>
                         );
                       })}
@@ -801,17 +786,17 @@ export default function AgenteProdutividade() {
               </div>
             )}
 
-            {/* ai tab */}
+            {/* ── Análise IA ── */}
             {tab === 'ai' && (
               <div>
-                <div style={{ ...sx.row, marginBottom: 16 }}>
-                  <button onClick={handleAiAnalysis} style={sx.btn(C.purple)} disabled={aiLoading || !anthropicKey}>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16 }}>
+                  <button className="ap-btn" style={{ background: C.navy, color: '#fff' }} onClick={handleAiAnalysis} disabled={aiLoading || !anthropicKey}>
                     {aiLoading ? 'Analisando…' : '✦ Gerar Análise com Claude Haiku'}
                   </button>
-                  {!anthropicKey && <span style={{ color: C.warn, fontSize: 12, alignSelf: 'center' }}>Configure a chave Anthropic para usar a análise IA.</span>}
+                  {!anthropicKey && <span style={{ color: C.amber, fontSize: 12 }}>Configure a chave Anthropic para usar a análise IA.</span>}
                 </div>
                 {aiReport && (
-                  <div style={{ ...sx.card, whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.7 }}>
+                  <div className="section-card" style={{ whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.8, color: C.textBright }}>
                     {aiReport}
                   </div>
                 )}
@@ -820,18 +805,15 @@ export default function AgenteProdutividade() {
           </div>
         )}
 
+        {/* empty state */}
         {!metrics && !loading && (
-          <div style={{ textAlign: 'center', color: C.muted, padding: 80, fontSize: 14 }}>
-            Configure a conexão com o Azure DevOps e clique em <strong>Buscar Dados</strong> para iniciar a análise.
+          <div style={{ background: '#FFFFFF', border: '1px solid #E8ECF5', borderRadius: 8, padding: '60px 28px', textAlign: 'center' }}>
+            <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'linear-gradient(135deg, #00366C, #39ADE3)', margin: '0 auto 16px' }} />
+            <div style={{ fontFamily: "'Manrope',sans-serif", fontWeight: 700, fontSize: 16, color: C.textBright, marginBottom: 6 }}>Agente de Produtividade</div>
+            <div style={{ fontSize: 13, color: C.textDim }}>Configure a conexão com o Azure DevOps e clique em <strong>Buscar Dados</strong> para iniciar a análise.</div>
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
-        button:disabled { opacity: .5; cursor: default; }
-        select option { background: #161b22; }
-      `}</style>
     </div>
   );
 }
