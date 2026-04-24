@@ -203,7 +203,8 @@ async function fetchTeamMembers(org, project, pat) {
 
 async function fetchWorkItems(org, project, pat, filters) {
   // [System.TeamProject] omitido — já está na URL; incluí-lo causa 400 em alguns tenants
-  const conditions = [];
+  // Épicos e Features são itens macro de backlog, não contam para produtividade
+  const conditions = [`[System.WorkItemType] NOT IN ('Epic', 'Feature')`];
   if (filters.iterationPath) conditions.push(`[System.IterationPath] = '${filters.iterationPath}'`);
   if (filters.assignedTo) conditions.push(`[System.AssignedTo] = '${filters.assignedTo}'`);
   if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}'`);
