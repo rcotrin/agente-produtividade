@@ -64,12 +64,20 @@ function calcHorasUteis(inicio, fim, pausas = []) {
   return totalMs / 3_600_000;
 }
 
+// Nas updates, cada campo vem como { oldValue, newValue } — não uma string direta.
+function colFromUpdate(u) {
+  return u.fields?.['System.BoardColumn']?.newValue || '';
+}
+function tsFromUpdate(u) {
+  return u.fields?.['System.ChangedDate']?.newValue || u.revisedDate || '';
+}
+
 function extrairPausas(updates) {
   const pausas = [];
   let pausaInicio = null;
   for (const u of updates) {
-    const label = (u.fields?.['System.BoardColumn'] || '').toLowerCase();
-    const ts = u.fields?.['System.ChangedDate'];
+    const label = colFromUpdate(u).toLowerCase();
+    const ts = tsFromUpdate(u);
     if (!ts) continue;
     if ((label.includes('pausa') || label.includes('bloqueio')) && !pausaInicio) {
       pausaInicio = ts;
@@ -79,6 +87,54 @@ function extrairPausas(updates) {
     }
   }
   return pausas;
+}
+
+function isIdleColumn(col) {
+  if (!col) return true;
+  const l = col.toLowerCase();
+  return (
+    l.includes('new') || l.includes('to do') || l.includes('todo') ||
+    l.includes('backlog') || l.includes('pausa') || l.includes('bloqueio') ||
+    l.includes('done') || l.includes('closed') || l.includes('resolved') ||
+    l.includes('cancelled') || l.includes('cancelad') || l.includes('aguardando') ||
+    l.includes('a fazer') || l.includes('novo') || l.includes('fila')
+  );
+}
+
+// Horas úteis baseadas no tempo real em colunas ativas do board
+function calcHorasUteisFromBoard(updates) {
+  const timeline = [];
+  for (const u of updates) {
+    const col = colFromUpdate(u);
+    const ts = tsFromUpdate(u);
+    if (col && ts) timeline.push({ col, ts });
+  }
+  if (!timeline.length) return 0;
+  timeline.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+
+  let total = 0;
+  for (let i = 0; i < timeline.length - 1; i++) {
+    if (!isIdleColumn(timeline[i].col)) {
+      total += calcHorasUteis(timeline[i].ts, timeline[i + 1].ts);
+    }
+  }
+  const last = timeline[timeline.length - 1];
+  if (!isIdleColumn(last.col)) {
+    total += calcHorasUteis(last.ts, new Date().toISOString());
+  }
+  return total;
+}
+
+// Primeira vez que o card entrou em coluna ativa (substitui ActivatedDate quando ausente)
+function findActivatedDate(updates) {
+  const timeline = [];
+  for (const u of updates) {
+    const col = colFromUpdate(u);
+    const ts = tsFromUpdate(u);
+    if (col && ts) timeline.push({ col, ts });
+  }
+  timeline.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  return timeline.find(t => !isIdleColumn(t.col))?.ts || null;
 }
 
 function horasToStr(h) {
@@ -146,17 +202,19 @@ async function fetchTeamMembers(org, project, pat) {
 }
 
 async function fetchWorkItems(org, project, pat, filters) {
-  const conditions = [`[System.TeamProject] = '${project}'`];
+  // [System.TeamProject] omitido — já está na URL; incluí-lo causa 400 em alguns tenants
+  const conditions = [];
   if (filters.iterationPath) conditions.push(`[System.IterationPath] = '${filters.iterationPath}'`);
   if (filters.assignedTo) conditions.push(`[System.AssignedTo] = '${filters.assignedTo}'`);
-  if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}'`);
-  if (filters.dateTo) conditions.push(`[System.ChangedDate] <= '${filters.dateTo}'`);
+  if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}T00:00:00Z'`);
+  if (filters.dateTo) conditions.push(`[System.ChangedDate] <= '${filters.dateTo}T23:59:59Z'`);
 
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')} ` : '';
   const wiql = {
-    query: `SELECT [System.Id] FROM WorkItems WHERE ${conditions.join(' AND ')} ORDER BY [System.ChangedDate] DESC`,
+    query: `SELECT [System.Id] FROM WorkItems ${where}ORDER BY [System.ChangedDate] DESC`,
   };
 
-  const res = await fetch(`/devops/${org}/${project}/_apis/wit/wiql?api-version=7.1`, {
+  const res = await fetch(`/devops/${org}/${project}/_apis/wit/wiql?$top=500&api-version=7.1`, {
     method: 'POST',
     headers: azHeaders(pat),
     body: JSON.stringify(wiql),
@@ -324,11 +382,12 @@ export default function AgenteProdutividade() {
         try { updates = await fetchUpdates(azOrg, azProject, azPat, id); } catch { /* skip */ }
         uMap[id] = updates;
 
+        // boardTimes: tempo acumulado por coluna (usa helpers corrigidos)
         const boardTimes = {};
         let prevCol = null, prevTs = null;
         for (const u of updates) {
-          const col = u.fields?.['System.BoardColumn']?.newValue;
-          const ts = u.revisedDate || u.fields?.['System.ChangedDate']?.newValue;
+          const col = colFromUpdate(u);
+          const ts = tsFromUpdate(u);
           if (col && ts) {
             if (prevCol && prevTs) boardTimes[prevCol] = (boardTimes[prevCol] || 0) + calcHorasUteis(prevTs, ts);
             prevCol = col; prevTs = ts;
@@ -338,12 +397,19 @@ export default function AgenteProdutividade() {
 
         const pausas = extrairPausas(updates);
         const createdDate = wi.fields?.['System.CreatedDate'];
-        const activatedDate = wi.fields?.['Microsoft.VSTS.Common.ActivatedDate'];
         const closedDate = wi.fields?.['Microsoft.VSTS.Common.ClosedDate'] || wi.fields?.['Microsoft.VSTS.Common.ResolvedDate'];
+
+        // Activated: campo nativo ou primeira entrada em coluna ativa
+        const activatedDate = wi.fields?.['Microsoft.VSTS.Common.ActivatedDate'] || findActivatedDate(updates);
+
+        // Horas úteis = tempo em colunas ativas do board; fallback para lead time se sem histórico
+        const horasUteisBoard = calcHorasUteisFromBoard(updates);
+        const horasUteis = horasUteisBoard > 0
+          ? horasUteisBoard
+          : calcHorasUteis(createdDate, closedDate || new Date().toISOString(), pausas);
 
         const leadTime = calcHorasUteis(createdDate, closedDate, pausas);
         const cycleTime = calcHorasUteis(activatedDate, closedDate, pausas);
-        const horasUteis = calcHorasUteis(createdDate, closedDate || new Date().toISOString(), pausas);
         const interacoes = updates.filter(u => u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef).length;
 
         mMap[id] = { leadTime, cycleTime, horasUteis, pausas, interacoes, boardTimes };
