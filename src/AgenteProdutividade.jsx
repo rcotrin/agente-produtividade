@@ -402,17 +402,18 @@ export default function AgenteProdutividade() {
         // Activated: campo nativo ou primeira entrada em coluna ativa
         const activatedDate = wi.fields?.['Microsoft.VSTS.Common.ActivatedDate'] || findActivatedDate(updates);
 
-        // Horas úteis = tempo em colunas ativas do board; fallback para lead time se sem histórico
-        const horasUteisBoard = calcHorasUteisFromBoard(updates);
-        const horasUteis = horasUteisBoard > 0
-          ? horasUteisBoard
-          : calcHorasUteis(createdDate, closedDate || new Date().toISOString(), pausas);
-
         const leadTime = calcHorasUteis(createdDate, closedDate, pausas);
         const cycleTime = calcHorasUteis(activatedDate, closedDate, pausas);
+
+        // Esforço registrado manualmente no Azure DevOps (campo CompletedWork)
+        const completedWork = wi.fields?.['Microsoft.VSTS.Scheduling.CompletedWork'] || 0;
+
+        // Tempo em colunas ativas — útil para Lead/Cycle Time de cards individuais
+        const horasUteisBoard = calcHorasUteisFromBoard(updates);
+
         const interacoes = updates.filter(u => u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef).length;
 
-        mMap[id] = { leadTime, cycleTime, horasUteis, pausas, interacoes, boardTimes };
+        mMap[id] = { leadTime, cycleTime, completedWork, horasUteisBoard, pausas, interacoes, boardTimes };
       }
 
       setUpdatesMap(uMap);
@@ -434,17 +435,25 @@ export default function AgenteProdutividade() {
       return s === 'done' || s === 'closed' || s === 'resolved';
     }).length;
 
-    const hoursByPerson = {};
-    const hoursByType = {};
+    // completedWorkByPerson: soma de CompletedWork (esforço manual registrado)
+    // itemsByPerson: contagem de cards por pessoa (para quem não usa CompletedWork)
+    const completedWorkByPerson = {};
+    const itemsByPerson = {};
+    const completedWorkByType = {};
     const boardTotals = {};
     const interByPerson = {};
+    let totalCompletedWork = 0;
+    let anyCompletedWork = false;
 
     for (const wi of workItems) {
       const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
       const type = wi.fields?.['System.WorkItemType'] || 'Outro';
-      const h = metricsMap[wi.id]?.horasUteis || 0;
-      hoursByPerson[name] = (hoursByPerson[name] || 0) + h;
-      hoursByType[type] = (hoursByType[type] || 0) + h;
+      const cw = metricsMap[wi.id]?.completedWork || 0;
+      if (cw > 0) anyCompletedWork = true;
+      completedWorkByPerson[name] = (completedWorkByPerson[name] || 0) + cw;
+      completedWorkByType[type] = (completedWorkByType[type] || 0) + cw;
+      itemsByPerson[name] = (itemsByPerson[name] || 0) + 1;
+      totalCompletedWork += cw;
       interByPerson[name] = (interByPerson[name] || 0) + (metricsMap[wi.id]?.interacoes || 0);
     }
 
@@ -453,6 +462,11 @@ export default function AgenteProdutividade() {
         boardTotals[col] = (boardTotals[col] || 0) + h;
       }
     }
+
+    // Se nenhum item tem CompletedWork preenchido, usar contagem de cards como proxy
+    const hoursByPerson = anyCompletedWork ? completedWorkByPerson : itemsByPerson;
+    const hoursByType = anyCompletedWork ? completedWorkByType : {};
+    const hoursLabel = anyCompletedWork ? 'Horas (CompletedWork)' : 'Qtd. Cards';
 
     const scatter = workItems
       .filter(w => metricsMap[w.id]?.leadTime > 0)
@@ -464,11 +478,10 @@ export default function AgenteProdutividade() {
         interacoes: metricsMap[w.id]?.interacoes || 0,
       }));
 
-    const totalHours = Object.values(hoursByPerson).reduce((a, b) => a + b, 0);
     const avgLeadTime = scatter.length ? scatter.reduce((a, s) => a + s.leadTime, 0) / scatter.length : 0;
     const avgCycleTime = scatter.length ? scatter.reduce((a, s) => a + s.cycleTime, 0) / scatter.length : 0;
 
-    return { totalItems, completedItems, totalHours, avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, boardTotals, scatter, interByPerson };
+    return { totalItems, completedItems, totalCompletedWork, anyCompletedWork, avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, hoursLabel, boardTotals, scatter, interByPerson };
   }, [workItems, metricsMap]);
 
   // ── AI analysis ────────────────────────────────────────────────────────────
@@ -479,7 +492,7 @@ export default function AgenteProdutividade() {
       const payload = {
         totalItems: metrics.totalItems,
         completedItems: metrics.completedItems,
-        totalHorasUteis: +metrics.totalHours.toFixed(1),
+        totalHorasUteis: +metrics.totalCompletedWork.toFixed(1),
         avgLeadTimeHoras: +metrics.avgLeadTime.toFixed(1),
         avgCycleTimeHoras: +metrics.avgCycleTime.toFixed(1),
         horasPorPessoa: Object.fromEntries(Object.entries(metrics.hoursByPerson).map(([k, v]) => [k, +v.toFixed(1)])),
@@ -668,7 +681,12 @@ export default function AgenteProdutividade() {
             {/* KPI strip */}
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 }}>
               <KpiCard label="Work Items" value={metrics.totalItems} sub={`${metrics.completedItems} concluídos`} color={C.navy} />
-              <KpiCard label="Horas Úteis Totais" value={horasToStr(metrics.totalHours)} color={C.accent} />
+              <KpiCard
+                label={metrics.anyCompletedWork ? 'Esforço Total (h)' : 'Total de Cards'}
+                value={metrics.anyCompletedWork ? horasToStr(metrics.totalCompletedWork) : metrics.totalItems}
+                sub={metrics.anyCompletedWork ? 'CompletedWork registrado' : 'CompletedWork não preenchido'}
+                color={C.accent}
+              />
               <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.amber} />
               <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.navyMed} />
               <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.coral} />
@@ -691,30 +709,43 @@ export default function AgenteProdutividade() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
 
                 <div className="section-card">
-                  <h4>Horas Úteis por Profissional</h4>
+                  <h4>{metrics.hoursLabel} por Profissional</h4>
+                  {!metrics.anyCompletedWork && (
+                    <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>
+                      Campo "CompletedWork" não preenchido — exibindo contagem de cards. Preencha as horas concluídas nos work items para ver esforço real.
+                    </div>
+                  )}
                   <ResponsiveContainer width="100%" height={240}>
-                    <BarChart data={Object.entries(metrics.hoursByPerson).map(([name, h]) => ({ name: name.split(' ')[0], horas: +h.toFixed(1) }))}>
+                    <BarChart data={Object.entries(metrics.hoursByPerson).map(([name, v]) => ({ name: name.split(' ')[0], valor: +Number(v).toFixed(1) }))}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                       <XAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
                       <YAxis tick={{ fill: C.textDim, fontSize: 11 }} />
                       <Tooltip content={<CustomTooltip />} />
-                      <Bar dataKey="horas" name="Horas" fill={C.accent} radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="valor" name={metrics.hoursLabel} fill={C.accent} radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
 
                 <div className="section-card">
-                  <h4>Distribuição por Tipo</h4>
+                  <h4>Distribuição por Tipo {metrics.anyCompletedWork ? '(h)' : '(cards)'}</h4>
                   <ResponsiveContainer width="100%" height={240}>
                     <PieChart>
                       <Pie
-                        data={Object.entries(metrics.hoursByType).map(([name, value]) => ({ name, value: +value.toFixed(1) }))}
+                        data={
+                          metrics.anyCompletedWork
+                            ? Object.entries(metrics.hoursByType).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value: +value.toFixed(1) }))
+                            : Object.entries(
+                                workItems.reduce((acc, wi) => {
+                                  const t = wi.fields?.['System.WorkItemType'] || 'Outro';
+                                  acc[t] = (acc[t] || 0) + 1;
+                                  return acc;
+                                }, {})
+                              ).map(([name, value]) => ({ name, value }))
+                        }
                         cx="50%" cy="50%" innerRadius={60} outerRadius={100}
                         dataKey="value" nameKey="name"
                       >
-                        {Object.keys(metrics.hoursByType).map((k, i) => (
-                          <Cell key={k} fill={TYPE_COLOR[k] || CHART_COLORS[i % CHART_COLORS.length]} />
-                        ))}
+                        {CHART_COLORS.map((col, i) => <Cell key={i} fill={col} />)}
                       </Pie>
                       <Tooltip content={<CustomTooltip />} />
                       <Legend wrapperStyle={{ fontSize: 11, color: C.textDim }} />
@@ -842,7 +873,7 @@ export default function AgenteProdutividade() {
                             <td style={{ padding: '7px 12px', color: C.muted, whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['Microsoft.VSTS.Common.ClosedDate'])}</td>
                             <td style={{ padding: '7px 12px', color: C.text }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
                             <td style={{ padding: '7px 12px', color: C.text }}>{m.cycleTime > 0 ? horasToStr(m.cycleTime) : '—'}</td>
-                            <td style={{ padding: '7px 12px', color: C.text }}>{m.horasUteis > 0 ? horasToStr(m.horasUteis) : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{m.completedWork > 0 ? horasToStr(m.completedWork) : '—'}</td>
                           </tr>
                         );
                       })}
