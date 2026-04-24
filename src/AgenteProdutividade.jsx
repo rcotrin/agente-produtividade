@@ -103,7 +103,12 @@ function azHeaders(pat) {
 
 async function azFetch(pat, url) {
   const res = await fetch(url, { headers: azHeaders(pat) });
-  if (!res.ok) throw new Error(`Azure DevOps ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const body = await res.text();
+    // strip HTML pages – keep only first 200 chars of plain-text errors
+    const clean = body.startsWith('<') ? `recurso não encontrado (${url.split('?')[0]})` : body.slice(0, 200);
+    throw new Error(`Azure DevOps ${res.status}: ${clean}`);
+  }
   return res.json();
 }
 
@@ -113,8 +118,15 @@ async function fetchProjects(org, pat) {
 }
 
 async function fetchIterations(org, project, pat) {
-  const data = await azFetch(pat, `/devops/${org}/${project}/_apis/work/teamsettings/iterations?api-version=7.1`);
-  return data.value || [];
+  // classificationnodes doesn't require team context — more reliable than teamsettings
+  const data = await azFetch(pat, `/devops/${org}/${project}/_apis/wit/classificationnodes/Iterations?$depth=10&api-version=7.1`);
+  const nodes = [];
+  function flatten(node) {
+    if (node.path) nodes.push({ id: node.id, name: node.name, path: node.path.replace(/^\\/, '') });
+    (node.children || []).forEach(flatten);
+  }
+  flatten(data);
+  return nodes;
 }
 
 async function fetchTeamMembers(org, project, pat) {
@@ -146,7 +158,11 @@ async function fetchWorkItems(org, project, pat, filters) {
     headers: azHeaders(pat),
     body: JSON.stringify(wiql),
   });
-  if (!res.ok) throw new Error(`WIQL ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const body = await res.text();
+    const clean = body.startsWith('<') ? `WIQL falhou — verifique projeto e permissões (${res.status})` : body.slice(0, 200);
+    throw new Error(clean);
+  }
   const data = await res.json();
   const ids = (data.workItems || []).map(w => w.id);
   if (!ids.length) return [];
@@ -270,12 +286,12 @@ export default function AgenteProdutividade() {
       const projs = await fetchProjects(azOrg, azPat);
       setProjects(projs);
       if (azProject) {
-        const [iters, mems] = await Promise.all([
+        const [iters, mems] = await Promise.allSettled([
           fetchIterations(azOrg, azProject, azPat),
           fetchTeamMembers(azOrg, azProject, azPat),
         ]);
-        setIterations(iters);
-        setMembers(mems);
+        if (iters.status === 'fulfilled') setIterations(iters.value);
+        if (mems.status === 'fulfilled') setMembers(mems.value);
       }
       setConfigOpen(false);
     } catch (e) {
