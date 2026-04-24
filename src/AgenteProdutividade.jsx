@@ -206,8 +206,8 @@ async function fetchWorkItems(org, project, pat, filters) {
   const conditions = [];
   if (filters.iterationPath) conditions.push(`[System.IterationPath] = '${filters.iterationPath}'`);
   if (filters.assignedTo) conditions.push(`[System.AssignedTo] = '${filters.assignedTo}'`);
-  if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}T00:00:00Z'`);
-  if (filters.dateTo) conditions.push(`[System.ChangedDate] <= '${filters.dateTo}T23:59:59Z'`);
+  if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}'`);
+  if (filters.dateTo) conditions.push(`[System.ChangedDate] <= '${filters.dateTo}'`);
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')} ` : '';
   const wiql = {
