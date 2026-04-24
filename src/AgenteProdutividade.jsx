@@ -368,6 +368,7 @@ export default function AgenteProdutividade() {
   const [workItems, setWorkItems] = useState([]);
   const [updatesMap, setUpdatesMap] = useState({});
   const [metricsMap, setMetricsMap] = useState({});
+  const [activityHours, setActivityHours] = useState({}); // { name: horas únicas detectadas }
 
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
@@ -416,7 +417,7 @@ export default function AgenteProdutividade() {
   // ── fetch & compute ────────────────────────────────────────────────────────
   const handleFetch = useCallback(async () => {
     if (!azOrg || !azProject || !azPat) return setError('Configure a conexão antes de buscar dados.');
-    setError(''); setLoading(true); setWorkItems([]); setUpdatesMap({}); setMetricsMap({}); setAiReport('');
+    setError(''); setLoading(true); setWorkItems([]); setUpdatesMap({}); setMetricsMap({}); setActivityHours({}); setAiReport('');
 
     try {
       setLoadingMsg('Buscando work items…');
@@ -470,6 +471,28 @@ export default function AgenteProdutividade() {
 
         mMap[id] = { leadTime, cycleTime, completedWork, horasUteisBoard, pausas, interacoes, boardTimes };
       }
+
+      // ── Janelas de Atividade ──────────────────────────────────────────────
+      // Para cada update, registra a hora-slot (pessoa+data+hora) como ativa.
+      // Horas únicas = limite inferior conservador de horas realmente trabalhadas.
+      const slots = {}; // { name: Set<"YYYY-MM-DD-HH"> }
+      for (const updates of Object.values(uMap)) {
+        for (const u of updates) {
+          const who = u.revisedBy?.displayName;
+          const ts = u.revisedDate || u.fields?.['System.ChangedDate']?.newValue;
+          if (!who || !ts) continue;
+          const d = new Date(ts);
+          if (!isWorkDay(d)) continue;
+          const h = d.getHours();
+          if (h < 9 || h >= 18) continue;
+          const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}-${h}`;
+          if (!slots[who]) slots[who] = new Set();
+          slots[who].add(key);
+        }
+      }
+      const aHours = {};
+      for (const [name, s] of Object.entries(slots)) aHours[name] = s.size;
+      setActivityHours(aHours);
 
       setUpdatesMap(uMap);
       setMetricsMap(mMap);
@@ -536,8 +559,37 @@ export default function AgenteProdutividade() {
     const avgLeadTime = scatter.length ? scatter.reduce((a, s) => a + s.leadTime, 0) / scatter.length : 0;
     const avgCycleTime = scatter.length ? scatter.reduce((a, s) => a + s.cycleTime, 0) / scatter.length : 0;
 
-    return { totalItems, completedItems, totalCompletedWork, anyCompletedWork, avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, hoursLabel, boardTotals, scatter, interByPerson };
-  }, [workItems, metricsMap]);
+    // ── Cobertura CompletedWork por pessoa ───────────────────────────────────
+    const cwCoverage = {}; // { name: { filled, total } }
+    for (const wi of workItems) {
+      const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
+      if (!cwCoverage[name]) cwCoverage[name] = { filled: 0, total: 0 };
+      cwCoverage[name].total++;
+      if ((metricsMap[wi.id]?.completedWork || 0) > 0) cwCoverage[name].filled++;
+    }
+    const globalCwCoverage = workItems.length
+      ? Math.round(100 * workItems.filter(w => (metricsMap[w.id]?.completedWork || 0) > 0).length / workItems.length)
+      : 0;
+
+    // ── Gráfico cruzado: Atividade vs CompletedWork ──────────────────────────
+    const allNames = new Set([...Object.keys(activityHours), ...Object.keys(completedWorkByPerson)]);
+    const activityVsCw = [...allNames].map(name => ({
+      name: name.split(' ')[0],
+      fullName: name,
+      atividade: activityHours[name] || 0,
+      completedWork: completedWorkByPerson[name] || 0,
+      cobertura: cwCoverage[name] ? Math.round(100 * cwCoverage[name].filled / cwCoverage[name].total) : 0,
+    })).sort((a, b) => b.atividade - a.atividade);
+
+    const totalActivityHours = Object.values(activityHours).reduce((a, b) => a + b, 0);
+
+    return {
+      totalItems, completedItems, totalCompletedWork, anyCompletedWork,
+      avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, hoursLabel,
+      boardTotals, scatter, interByPerson,
+      cwCoverage, globalCwCoverage, activityVsCw, totalActivityHours,
+    };
+  }, [workItems, metricsMap, activityHours]);
 
   // ── AI analysis ────────────────────────────────────────────────────────────
   const handleAiAnalysis = useCallback(async () => {
@@ -745,6 +797,18 @@ export default function AgenteProdutividade() {
               <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.amber} />
               <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.navyMed} />
               <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.coral} />
+              <KpiCard
+                label="Atividade Detectada"
+                value={`${metrics.totalActivityHours}h`}
+                sub="horas únicas com interação"
+                color={C.navyMed}
+              />
+              <KpiCard
+                label="Cobertura CompletedWork"
+                value={`${metrics.globalCwCoverage}%`}
+                sub="cards com horas declaradas"
+                color={metrics.globalCwCoverage >= 70 ? C.green : metrics.globalCwCoverage >= 40 ? C.amber : C.coral}
+              />
             </div>
 
             {/* tabs */}
@@ -835,6 +899,77 @@ export default function AgenteProdutividade() {
                       <Tooltip content={<CustomTooltip />} />
                     </RadarChart>
                   </ResponsiveContainer>
+                </div>
+
+                {/* ── Atividade vs CompletedWork ── */}
+                <div className="section-card" style={{ gridColumn: '1 / -1' }}>
+                  <h4>Atividade Detectada vs. CompletedWork por Profissional</h4>
+                  <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12, lineHeight: 1.6 }}>
+                    <strong style={{ color: C.navyMed }}>Atividade Detectada</strong> = horas únicas em que a pessoa fez ao menos uma interação (update, comentário, mudança de estado) dentro do horário comercial — limite inferior conservador de horas trabalhadas.&nbsp;
+                    <strong style={{ color: C.accent }}>CompletedWork</strong> = horas declaradas manualmente no Azure DevOps.
+                    Se Atividade {'>'} CompletedWork, a pessoa trabalhou mais do que declarou.
+                  </div>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={metrics.activityVsCw} barGap={4}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                      <XAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <YAxis tick={{ fill: C.textDim, fontSize: 11 }} unit="h" />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          const d = metrics.activityVsCw.find(x => x.name === label);
+                          return (
+                            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: '10px 14px', fontSize: 12, boxShadow: '0 2px 8px #00366C0e' }}>
+                              <div style={{ fontWeight: 700, color: C.textBright, marginBottom: 6 }}>{d?.fullName || label}</div>
+                              {payload.map((p, i) => (
+                                <div key={i} style={{ color: p.color }}>{p.name}: <strong>{p.value}h</strong></div>
+                              ))}
+                              {d && <div style={{ color: C.muted, marginTop: 4 }}>Cobertura CW: {d.cobertura}%</div>}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 11, color: C.textDim }} />
+                      <Bar dataKey="atividade" name="Atividade Detectada (h)" fill={C.navyMed} radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="completedWork" name="CompletedWork (h)" fill={C.accent} radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+
+                  {/* tabela de cobertura */}
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginTop: 16 }}>
+                    <thead>
+                      <tr style={{ background: C.sectionBg }}>
+                        {['Profissional', 'Atividade (h)', 'CompletedWork (h)', 'Cards c/ CW', 'Cobertura', 'Divergência'].map(h => (
+                          <th key={h} style={{ padding: '7px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metrics.activityVsCw.map(row => {
+                        const div = row.atividade - row.completedWork;
+                        const cov = metrics.cwCoverage[row.fullName] || { filled: 0, total: 0 };
+                        return (
+                          <tr key={row.fullName} className="wi-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                            <td style={{ padding: '7px 12px', color: C.textBright, fontWeight: 600 }}>{row.fullName}</td>
+                            <td style={{ padding: '7px 12px', color: C.navyMed, fontWeight: 700 }}>{row.atividade}h</td>
+                            <td style={{ padding: '7px 12px', color: C.accent }}>{row.completedWork > 0 ? `${row.completedWork}h` : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: C.text }}>{cov.filled}/{cov.total}</td>
+                            <td style={{ padding: '7px 12px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: 'hidden', minWidth: 60 }}>
+                                  <div style={{ width: `${row.cobertura}%`, height: '100%', background: row.cobertura >= 70 ? C.green : row.cobertura >= 40 ? C.amber : C.coral, borderRadius: 3 }} />
+                                </div>
+                                <span style={{ color: row.cobertura >= 70 ? C.green : row.cobertura >= 40 ? C.amber : C.coral, fontWeight: 700, fontSize: 11 }}>{row.cobertura}%</span>
+                              </div>
+                            </td>
+                            <td style={{ padding: '7px 12px', color: div > 8 ? C.amber : C.muted, fontWeight: div > 8 ? 700 : 400 }}>
+                              {row.completedWork > 0 ? (div > 0 ? `+${div}h não declaradas` : div < 0 ? `${Math.abs(div)}h acima da atividade` : '✓ coerente') : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}
