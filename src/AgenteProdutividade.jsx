@@ -789,26 +789,22 @@ export default function AgenteProdutividade() {
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 }}>
               <KpiCard label="Work Items" value={metrics.totalItems} sub={`${metrics.completedItems} concluídos`} color={C.navy} />
               <KpiCard
-                label={metrics.anyCompletedWork ? 'Esforço Total (h)' : 'Total de Cards'}
-                value={metrics.anyCompletedWork ? horasToStr(metrics.totalCompletedWork) : metrics.totalItems}
-                sub={metrics.anyCompletedWork ? 'CompletedWork registrado' : 'CompletedWork não preenchido'}
+                label="Atividade Detectada (h)"
+                value={`${metrics.totalActivityHours}h`}
+                sub="horas únicas com interação no ADO"
                 color={C.accent}
               />
               <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.amber} />
               <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.navyMed} />
               <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.coral} />
-              <KpiCard
-                label="Atividade Detectada"
-                value={`${metrics.totalActivityHours}h`}
-                sub="horas únicas com interação"
-                color={C.navyMed}
-              />
-              <KpiCard
-                label="Cobertura CompletedWork"
-                value={`${metrics.globalCwCoverage}%`}
-                sub="cards com horas declaradas"
-                color={metrics.globalCwCoverage >= 70 ? C.green : metrics.globalCwCoverage >= 40 ? C.amber : C.coral}
-              />
+              {metrics.anyCompletedWork && (
+                <KpiCard
+                  label="CompletedWork Total"
+                  value={horasToStr(metrics.totalCompletedWork)}
+                  sub={`${metrics.globalCwCoverage}% dos cards preenchidos`}
+                  color={C.green}
+                />
+              )}
             </div>
 
             {/* tabs */}
@@ -828,19 +824,17 @@ export default function AgenteProdutividade() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
 
                 <div className="section-card">
-                  <h4>{metrics.hoursLabel} por Profissional</h4>
-                  {!metrics.anyCompletedWork && (
-                    <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>
-                      Campo "CompletedWork" não preenchido — exibindo contagem de cards. Preencha as horas concluídas nos work items para ver esforço real.
-                    </div>
-                  )}
+                  <h4>Atividade Detectada por Profissional (h)</h4>
+                  <div style={{ fontSize: 11, color: C.textDim, marginBottom: 8 }}>
+                    Horas únicas em que cada pessoa realizou ao menos uma interação no Azure DevOps dentro do horário comercial (9h–18h, dias úteis).
+                  </div>
                   <ResponsiveContainer width="100%" height={240}>
-                    <BarChart data={Object.entries(metrics.hoursByPerson).map(([name, v]) => ({ name: name.split(' ')[0], valor: +Number(v).toFixed(1) }))}>
+                    <BarChart data={metrics.activityVsCw.map(r => ({ name: r.name, horas: r.atividade }))}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                       <XAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
-                      <YAxis tick={{ fill: C.textDim, fontSize: 11 }} />
+                      <YAxis tick={{ fill: C.textDim, fontSize: 11 }} unit="h" />
                       <Tooltip content={<CustomTooltip />} />
-                      <Bar dataKey="valor" name={metrics.hoursLabel} fill={C.accent} radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="horas" name="Atividade (h)" fill={C.accent} radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -905,9 +899,10 @@ export default function AgenteProdutividade() {
                 <div className="section-card" style={{ gridColumn: '1 / -1' }}>
                   <h4>Atividade Detectada vs. CompletedWork por Profissional</h4>
                   <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12, lineHeight: 1.6 }}>
-                    <strong style={{ color: C.navyMed }}>Atividade Detectada</strong> = horas únicas em que a pessoa fez ao menos uma interação (update, comentário, mudança de estado) dentro do horário comercial — limite inferior conservador de horas trabalhadas.&nbsp;
-                    <strong style={{ color: C.accent }}>CompletedWork</strong> = horas declaradas manualmente no Azure DevOps.
-                    Se Atividade {'>'} CompletedWork, a pessoa trabalhou mais do que declarou.
+                    <strong style={{ color: C.navyMed }}>Atividade Detectada</strong> = horas únicas com ao menos uma interação no ADO em horário comercial — métrica principal de esforço quando CompletedWork não é preenchido.
+                    {metrics.anyCompletedWork
+                      ? <> <strong style={{ color: C.accent }}>CompletedWork</strong> = horas declaradas manualmente. Divergência {'>'} 8h pode indicar trabalho não registrado.</>
+                      : <span style={{ color: C.amber }}> CompletedWork não preenchido pela equipe — coluna exibe "—".</span>}
                   </div>
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={metrics.activityVsCw} barGap={4}>
