@@ -21,10 +21,64 @@ const TYPE_COLOR = {
   'Task': '#0284c7', 'Bug': C.coral, 'Test Case': '#6366f1',
 };
 
+// ─── feriados nacionais brasileiros ──────────────────────────────────────────
+// Fixos: MM-DD
+const FERIADOS_FIXOS = new Set([
+  '01-01', // Confraternização Universal
+  '04-21', // Tiradentes
+  '05-01', // Dia do Trabalho
+  '09-07', // Independência do Brasil
+  '10-12', // Nossa Senhora Aparecida
+  '11-02', // Finados
+  '11-15', // Proclamação da República
+  '11-20', // Consciência Negra (lei federal desde 2024)
+  '12-25', // Natal
+]);
+
+// Algoritmo de Butcher para calcular a Páscoa
+function calcPascoa(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function toKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const _feriadosMoveis = {};
+function getFeriadosMoveis(year) {
+  if (_feriadosMoveis[year]) return _feriadosMoveis[year];
+  const pascoa = calcPascoa(year);
+  const offsets = { carnaval2: -47, carnaval3: -46, sextaSanta: -2, pascoa: 0, corpusChristi: 60 };
+  const set = new Set(
+    Object.values(offsets).map(o => {
+      const d = new Date(pascoa);
+      d.setDate(pascoa.getDate() + o);
+      return toKey(d);
+    })
+  );
+  _feriadosMoveis[year] = set;
+  return set;
+}
+
+function isFeriado(d) {
+  const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (FERIADOS_FIXOS.has(mmdd)) return true;
+  return getFeriadosMoveis(d.getFullYear()).has(toKey(d));
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function isWorkDay(d) {
   const dow = d.getDay();
-  return dow !== 0 && dow !== 6;
+  return dow !== 0 && dow !== 6 && !isFeriado(d);
 }
 
 function calcHorasUteis(inicio, fim, pausas = []) {
