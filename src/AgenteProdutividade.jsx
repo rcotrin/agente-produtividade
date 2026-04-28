@@ -235,7 +235,8 @@ async function fetchIterations(org, project, pat) {
   const data = await azFetch(pat, `/devops/${org}/${project}/_apis/wit/classificationnodes/Iterations?$depth=10&api-version=7.1`);
   const nodes = [];
   function flatten(node) {
-    if (node.path) nodes.push({ id: node.id, name: node.name, path: node.path.replace(/^\\/, '') });
+    // classificationnodes retorna "\Projeto\Iteration\Sprint X"; WIQL espera "\Projeto\Sprint X"
+    if (node.path) nodes.push({ id: node.id, name: node.name, path: node.path.replace(/^\\/, '').replace(/\\Iteration($|\\)/, '$1') });
     (node.children || []).forEach(flatten);
   }
   flatten(data);
@@ -258,9 +259,19 @@ async function fetchTeamMembers(org, project, pat) {
 async function fetchWorkItems(org, project, pat, filters) {
   // [System.TeamProject] omitido — já está na URL; incluí-lo causa 400 em alguns tenants
   // Épicos e Features são itens macro de backlog, não contam para produtividade
-  const conditions = [`[System.WorkItemType] NOT IN ('Epic', 'Feature')`];
-  if (filters.iterationPath) conditions.push(`[System.IterationPath] = '${filters.iterationPath}'`);
-  if (filters.assignedTo) conditions.push(`[System.AssignedTo] = '${filters.assignedTo}'`);
+  // AssignedTo é filtrado no frontend para não distorcer o cálculo de Atividade Detectada.
+  // Filtrar por pessoa no WIQL faz com que atualizações em cards de colegas não sejam
+  // carregadas, subestimando as horas de quem comenta/revisa fora dos seus próprios cards.
+  // @project referencia o projeto da URL — evita 400 que ocorre com nome hardcoded
+  const conditions = [
+    `[System.TeamProject] = @project`,
+    `[System.WorkItemType] NOT IN ('Epic', 'Feature')`,
+  ];
+  if (filters.iterationPath) {
+    // classificationnodes inclui "\Iteration\" no path, mas WIQL usa o path sem esse nó-raiz
+    const iterPath = filters.iterationPath.replace(/\\Iteration($|\\)/, '$1');
+    conditions.push(`[System.IterationPath] UNDER '${iterPath}'`);
+  }
   if (filters.dateFrom) conditions.push(`[System.ChangedDate] >= '${filters.dateFrom}'`);
   if (filters.dateTo) conditions.push(`[System.ChangedDate] <= '${filters.dateTo}'`);
 
@@ -368,7 +379,8 @@ export default function AgenteProdutividade() {
   const [workItems, setWorkItems] = useState([]);
   const [updatesMap, setUpdatesMap] = useState({});
   const [metricsMap, setMetricsMap] = useState({});
-  const [activityHours, setActivityHours] = useState({}); // { name: horas únicas detectadas }
+  const [activityHours, setActivityHours] = useState({});     // { name: horas únicas detectadas }
+  const [interactionsAll, setInteractionsAll] = useState({}); // { name: total de interações em todos os cards }
 
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
@@ -377,6 +389,8 @@ export default function AgenteProdutividade() {
   const [aiReport, setAiReport] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [configOpen, setConfigOpen] = useState(true);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpTab, setHelpTab] = useState('manual');
 
   // ── connect ────────────────────────────────────────────────────────────────
   const handleConnect = useCallback(async () => {
@@ -390,7 +404,7 @@ export default function AgenteProdutividade() {
           fetchIterations(azOrg, azProject, azPat),
           fetchTeamMembers(azOrg, azProject, azPat),
         ]);
-        if (iters.status === 'fulfilled') setIterations(iters.value);
+        if (iters.status === 'fulfilled') { setIterations(iters.value); setFilterIteration(''); }
         if (mems.status === 'fulfilled') setMembers(mems.value);
       }
       setConfigOpen(false);
@@ -409,7 +423,7 @@ export default function AgenteProdutividade() {
         fetchIterations(azOrg, proj, azPat),
         fetchTeamMembers(azOrg, proj, azPat),
       ]);
-      if (iters.status === 'fulfilled') setIterations(iters.value);
+      if (iters.status === 'fulfilled') { setIterations(iters.value); setFilterIteration(''); }
       if (mems.status === 'fulfilled') setMembers(mems.value);
     } catch { /* ignore */ }
   }, [azOrg, azPat]);
@@ -417,11 +431,11 @@ export default function AgenteProdutividade() {
   // ── fetch & compute ────────────────────────────────────────────────────────
   const handleFetch = useCallback(async () => {
     if (!azOrg || !azProject || !azPat) return setError('Configure a conexão antes de buscar dados.');
-    setError(''); setLoading(true); setWorkItems([]); setUpdatesMap({}); setMetricsMap({}); setActivityHours({}); setAiReport('');
+    setError(''); setLoading(true); setWorkItems([]); setUpdatesMap({}); setMetricsMap({}); setActivityHours({}); setInteractionsAll({}); setAiReport('');
 
     try {
       setLoadingMsg('Buscando work items…');
-      const filters = { iterationPath: filterIteration, assignedTo: filterMember, dateFrom: filterDateFrom, dateTo: filterDateTo };
+      const filters = { iterationPath: filterIteration, dateFrom: filterDateFrom, dateTo: filterDateTo };
       const items = await fetchWorkItems(azOrg, azProject, azPat, filters);
       setWorkItems(items);
 
@@ -461,15 +475,14 @@ export default function AgenteProdutividade() {
         const leadTime = calcHorasUteis(createdDate, closedDate, pausas);
         const cycleTime = calcHorasUteis(activatedDate, closedDate, pausas);
 
-        // Esforço registrado manualmente no Azure DevOps (campo CompletedWork)
         const completedWork = wi.fields?.['Microsoft.VSTS.Scheduling.CompletedWork'] || 0;
+        const originalEstimate = wi.fields?.['Microsoft.VSTS.Scheduling.OriginalEstimate'] || 0;
 
-        // Tempo em colunas ativas — útil para Lead/Cycle Time de cards individuais
         const horasUteisBoard = calcHorasUteisFromBoard(updates);
 
         const interacoes = updates.filter(u => u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef).length;
 
-        mMap[id] = { leadTime, cycleTime, completedWork, horasUteisBoard, pausas, interacoes, boardTimes };
+        mMap[id] = { leadTime, cycleTime, completedWork, originalEstimate, horasUteisBoard, pausas, interacoes, boardTimes };
       }
 
       // ── Janelas de Atividade ──────────────────────────────────────────────
@@ -494,6 +507,20 @@ export default function AgenteProdutividade() {
       for (const [name, s] of Object.entries(slots)) aHours[name] = s.size;
       setActivityHours(aHours);
 
+      // ── Interações globais (todos os cards, não só os atribuídos) ─────────────
+      // Consistente com activityHours: conta quem agiu, independente de assignedTo.
+      const interAll = {};
+      for (const updates of Object.values(uMap)) {
+        for (const u of updates) {
+          const who = u.revisedBy?.displayName;
+          if (!who) continue;
+          if (u.fields?.['System.State'] || u.fields?.['System.AssignedTo'] || u.commentVersionRef) {
+            interAll[who] = (interAll[who] || 0) + 1;
+          }
+        }
+      }
+      setInteractionsAll(interAll);
+
       setUpdatesMap(uMap);
       setMetricsMap(mMap);
     } catch (e) {
@@ -501,14 +528,19 @@ export default function AgenteProdutividade() {
     } finally {
       setLoading(false); setLoadingMsg('');
     }
-  }, [azOrg, azProject, azPat, filterIteration, filterMember, filterDateFrom, filterDateTo]);
+  }, [azOrg, azProject, azPat, filterIteration, filterDateFrom, filterDateTo]);
 
   // ── derived metrics ────────────────────────────────────────────────────────
   const metrics = useMemo(() => {
     if (!workItems.length) return null;
 
-    const totalItems = workItems.length;
-    const completedItems = workItems.filter(w => {
+    // Filtro de pessoa aplicado aqui, não no WIQL, para preservar atividade completa
+    const visibleItems = filterMember
+      ? workItems.filter(w => (w.fields?.['System.AssignedTo']?.displayName || '') === filterMember)
+      : workItems;
+
+    const totalItems = visibleItems.length;
+    const completedItems = visibleItems.filter(w => {
       const s = (w.fields?.['System.State'] || '').toLowerCase();
       return s === 'done' || s === 'closed' || s === 'resolved';
     }).length;
@@ -516,37 +548,44 @@ export default function AgenteProdutividade() {
     // completedWorkByPerson: soma de CompletedWork (esforço manual registrado)
     // itemsByPerson: contagem de cards por pessoa (para quem não usa CompletedWork)
     const completedWorkByPerson = {};
+    const originalEstimateByPerson = {};
     const itemsByPerson = {};
     const completedWorkByType = {};
     const boardTotals = {};
     const interByPerson = {};
     let totalCompletedWork = 0;
+    let totalOriginalEstimate = 0;
     let anyCompletedWork = false;
+    let anyOriginalEstimate = false;
 
-    for (const wi of workItems) {
+    for (const wi of visibleItems) {
       const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
       const type = wi.fields?.['System.WorkItemType'] || 'Outro';
       const cw = metricsMap[wi.id]?.completedWork || 0;
+      const oe = metricsMap[wi.id]?.originalEstimate || 0;
       if (cw > 0) anyCompletedWork = true;
+      if (oe > 0) anyOriginalEstimate = true;
       completedWorkByPerson[name] = (completedWorkByPerson[name] || 0) + cw;
+      originalEstimateByPerson[name] = (originalEstimateByPerson[name] || 0) + oe;
       completedWorkByType[type] = (completedWorkByType[type] || 0) + cw;
       itemsByPerson[name] = (itemsByPerson[name] || 0) + 1;
       totalCompletedWork += cw;
+      totalOriginalEstimate += oe;
       interByPerson[name] = (interByPerson[name] || 0) + (metricsMap[wi.id]?.interacoes || 0);
     }
 
-    for (const m of Object.values(metricsMap)) {
-      for (const [col, h] of Object.entries(m.boardTimes || {})) {
+    // boardTotals: apenas dos cards visíveis
+    for (const wi of visibleItems) {
+      for (const [col, h] of Object.entries(metricsMap[wi.id]?.boardTimes || {})) {
         boardTotals[col] = (boardTotals[col] || 0) + h;
       }
     }
 
-    // Se nenhum item tem CompletedWork preenchido, usar contagem de cards como proxy
     const hoursByPerson = anyCompletedWork ? completedWorkByPerson : itemsByPerson;
     const hoursByType = anyCompletedWork ? completedWorkByType : {};
     const hoursLabel = anyCompletedWork ? 'Horas (CompletedWork)' : 'Qtd. Cards';
 
-    const scatter = workItems
+    const scatter = visibleItems
       .filter(w => metricsMap[w.id]?.leadTime > 0)
       .map(w => ({
         id: w.id,
@@ -559,37 +598,88 @@ export default function AgenteProdutividade() {
     const avgLeadTime = scatter.length ? scatter.reduce((a, s) => a + s.leadTime, 0) / scatter.length : 0;
     const avgCycleTime = scatter.length ? scatter.reduce((a, s) => a + s.cycleTime, 0) / scatter.length : 0;
 
-    // ── Cobertura CompletedWork por pessoa ───────────────────────────────────
-    const cwCoverage = {}; // { name: { filled, total } }
-    for (const wi of workItems) {
+    // ── Cobertura CompletedWork (baseada em visibleItems) ────────────────────
+    const cwCoverage = {};
+    for (const wi of visibleItems) {
       const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
       if (!cwCoverage[name]) cwCoverage[name] = { filled: 0, total: 0 };
       cwCoverage[name].total++;
       if ((metricsMap[wi.id]?.completedWork || 0) > 0) cwCoverage[name].filled++;
     }
-    const globalCwCoverage = workItems.length
-      ? Math.round(100 * workItems.filter(w => (metricsMap[w.id]?.completedWork || 0) > 0).length / workItems.length)
+    const globalCwCoverage = visibleItems.length
+      ? Math.round(100 * visibleItems.filter(w => (metricsMap[w.id]?.completedWork || 0) > 0).length / visibleItems.length)
       : 0;
 
-    // ── Gráfico cruzado: Atividade vs CompletedWork ──────────────────────────
-    const allNames = new Set([...Object.keys(activityHours), ...Object.keys(completedWorkByPerson)]);
-    const activityVsCw = [...allNames].map(name => ({
-      name: name.split(' ')[0],
-      fullName: name,
-      atividade: activityHours[name] || 0,
-      completedWork: completedWorkByPerson[name] || 0,
-      cobertura: cwCoverage[name] ? Math.round(100 * cwCoverage[name].filled / cwCoverage[name].total) : 0,
-    })).sort((a, b) => b.atividade - a.atividade);
+    const oeCoverage = {};
+    for (const wi of visibleItems) {
+      const name = wi.fields?.['System.AssignedTo']?.displayName || 'Não atribuído';
+      if (!oeCoverage[name]) oeCoverage[name] = { filled: 0, total: 0 };
+      oeCoverage[name].total++;
+      if ((metricsMap[wi.id]?.originalEstimate || 0) > 0) oeCoverage[name].filled++;
+    }
+    const globalOeCoverage = visibleItems.length
+      ? Math.round(100 * visibleItems.filter(w => (metricsMap[w.id]?.originalEstimate || 0) > 0).length / visibleItems.length)
+      : 0;
+    const globalEfficiency = (totalOriginalEstimate > 0 && totalCompletedWork > 0)
+      ? Math.round(totalCompletedWork / totalOriginalEstimate * 100)
+      : null;
 
-    const totalActivityHours = Object.values(activityHours).reduce((a, b) => a + b, 0);
+    // ── Atividade Detectada: sempre do total de atualizações carregadas ───────
+    // Filtro de pessoa aplicado aqui para exibição, mas a contagem de slots
+    // foi feita sobre TODOS os updates — garante consistência entre filtros.
+    const visibleActivity = filterMember
+      ? { [filterMember]: activityHours[filterMember] || 0 }
+      : activityHours;
+
+    const allNames = new Set([
+      ...Object.keys(visibleActivity),
+      ...Object.keys(completedWorkByPerson),
+      ...Object.keys(originalEstimateByPerson),
+    ]);
+    const activityVsCw = [...allNames].map(name => {
+      const cw = completedWorkByPerson[name] || 0;
+      const oe = originalEstimateByPerson[name] || 0;
+      return {
+        name: name.split(' ')[0],
+        fullName: name,
+        atividade: visibleActivity[name] || 0,
+        completedWork: cw,
+        originalEstimate: oe,
+        cobertura: cwCoverage[name] ? Math.round(100 * cwCoverage[name].filled / cwCoverage[name].total) : 0,
+        coberturaOe: oeCoverage[name] ? Math.round(100 * oeCoverage[name].filled / oeCoverage[name].total) : 0,
+        eficiencia: (oe > 0 && cw > 0) ? Math.round(cw / oe * 100) : null,
+      };
+    }).sort((a, b) => b.atividade - a.atividade);
+
+    const totalActivityHours = Object.values(visibleActivity).reduce((a, b) => a + b, 0);
+
+    // ── Taxa de Interação: interações globais / hora de atividade ─────────────
+    // Ambas as métricas computadas sobre todos os cards — sem contradição.
+    const visibleInter = filterMember
+      ? { [filterMember]: interactionsAll[filterMember] || 0 }
+      : interactionsAll;
+    const allInterNames = [...new Set([...Object.keys(visibleInter), ...Object.keys(visibleActivity)])];
+    const interactionRate = allInterNames.map(name => {
+      const inter = visibleInter[name] || 0;
+      const horas = visibleActivity[name] || 0;
+      return {
+        name: name.split(' ')[0],
+        fullName: name,
+        interacoes: inter,
+        atividade: horas,
+        taxa: horas > 0 ? +(inter / horas).toFixed(1) : 0,
+      };
+    }).sort((a, b) => b.taxa - a.taxa);
 
     return {
       totalItems, completedItems, totalCompletedWork, anyCompletedWork,
+      totalOriginalEstimate, anyOriginalEstimate, globalOeCoverage, globalEfficiency,
       avgLeadTime, avgCycleTime, hoursByPerson, hoursByType, hoursLabel,
       boardTotals, scatter, interByPerson,
-      cwCoverage, globalCwCoverage, activityVsCw, totalActivityHours,
+      cwCoverage, globalCwCoverage, oeCoverage, activityVsCw, totalActivityHours,
+      interactionRate,
     };
-  }, [workItems, metricsMap, activityHours]);
+  }, [workItems, metricsMap, activityHours, interactionsAll, filterMember]);
 
   // ── AI analysis ────────────────────────────────────────────────────────────
   const handleAiAnalysis = useCallback(async () => {
@@ -597,33 +687,58 @@ export default function AgenteProdutividade() {
     setAiLoading(true); setAiReport('');
     try {
       const payload = {
-        totalItems: metrics.totalItems,
-        completedItems: metrics.completedItems,
-        totalHorasUteis: +metrics.totalCompletedWork.toFixed(1),
-        avgLeadTimeHoras: +metrics.avgLeadTime.toFixed(1),
-        avgCycleTimeHoras: +metrics.avgCycleTime.toFixed(1),
-        horasPorPessoa: Object.fromEntries(Object.entries(metrics.hoursByPerson).map(([k, v]) => [k, +v.toFixed(1)])),
-        horasPorTipo: Object.fromEntries(Object.entries(metrics.hoursByType).map(([k, v]) => [k, +v.toFixed(1)])),
-        tempoPorColuna: Object.fromEntries(Object.entries(metrics.boardTotals).map(([k, v]) => [k, +v.toFixed(1)])),
-        interacoesPorPessoa: metrics.interByPerson,
-        project: azProject,
+        projeto: azProject,
         filtros: { iteracao: filterIteration, membro: filterMember, de: filterDateFrom, ate: filterDateTo },
+        totalWorkItems: metrics.totalItems,
+        itensConcluidosPct: metrics.totalItems ? Math.round(100 * metrics.completedItems / metrics.totalItems) : 0,
+        atividadeDetectadaTotal_h: metrics.totalActivityHours,
+        avgLeadTime_h: +metrics.avgLeadTime.toFixed(1),
+        avgCycleTime_h: +metrics.avgCycleTime.toFixed(1),
+        porPessoa: metrics.interactionRate.map(r => ({
+          nome: r.fullName,
+          atividade_h: r.atividade,
+          interacoes: r.interacoes,
+          taxaInteracao_por_h: r.taxa,
+        })),
+        tempoPorColuna_h: Object.fromEntries(
+          Object.entries(metrics.boardTotals).map(([k, v]) => [k, +v.toFixed(1)])
+        ),
+        originalEstimate_h: metrics.anyOriginalEstimate ? +metrics.totalOriginalEstimate.toFixed(1) : null,
+        coberturaOriginalEstimate_pct: metrics.anyOriginalEstimate ? metrics.globalOeCoverage : null,
+        completedWork_h: metrics.anyCompletedWork ? +metrics.totalCompletedWork.toFixed(1) : null,
+        coberturaCompletedWork_pct: metrics.anyCompletedWork ? metrics.globalCwCoverage : null,
+        eficiencia_cw_oe_pct: metrics.globalEfficiency,
       };
 
       const res = await fetch('/anthropic/v1/messages', {
         method: 'POST',
-        headers: { 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        headers: {
+          'x-api-key': anthropicKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 1024,
-          system: `Você é um consultor sênior de produtividade de equipes de software. Analise os dados abaixo e gere um relatório executivo em português com: (1) principais achados, (2) pontos de atenção, (3) recomendações acionáveis. Seja objetivo e direto. Use markdown.`,
-          messages: [{ role: 'user', content: `Dados do projeto ${azProject}:\n\n${JSON.stringify(payload, null, 2)}` }],
+          max_tokens: 1500,
+          system: `Você é um consultor sênior de produtividade de equipes de software. Analise os dados de Azure DevOps abaixo e gere um relatório executivo em português com: (1) principais achados, (2) pontos de atenção e riscos, (3) recomendações acionáveis priorizadas. Seja objetivo e direto. Use markdown com headers ##.`,
+          messages: [{ role: 'user', content: `Dados do projeto:\n\n${JSON.stringify(payload, null, 2)}` }],
         }),
       });
+
       const data = await res.json();
-      setAiReport(data.content?.[0]?.text || 'Sem resposta.');
+
+      if (!res.ok) {
+        const msg = data?.error?.message || JSON.stringify(data);
+        throw new Error(`Anthropic ${res.status}: ${msg}`);
+      }
+      if (data.type === 'error') {
+        throw new Error(data.error?.message || 'Erro desconhecido da API');
+      }
+
+      setAiReport(data.content?.[0]?.text || 'API retornou resposta vazia.');
     } catch (e) {
-      setAiReport(`Erro: ${e.message}`);
+      setAiReport(`**Erro:** ${e.message}`);
     } finally {
       setAiLoading(false);
     }
@@ -677,7 +792,8 @@ export default function AgenteProdutividade() {
 
       {/* ── header ── */}
       <div style={{ background: '#FFFFFF', borderBottom: '1px solid #E8ECF5', padding: '14px 28px', display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 2px 8px #00366C0e' }}>
-        <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'linear-gradient(135deg, #00366C, #39ADE3)', flexShrink: 0 }} />
+        <img src="/ytecnologia.png" alt="Y Tecnologia" style={{ height: 32, width: 'auto', flexShrink: 0 }} />
+        <div style={{ width: 1, height: 22, background: '#E8ECF5', margin: '0 4px' }} />
         <span style={{ fontFamily: "'Manrope',sans-serif", fontWeight: 800, fontSize: 18, background: 'linear-gradient(30deg, #00366C 0%, #39ADE3 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text', letterSpacing: '-0.01em' }}>
           Agente de Produtividade
         </span>
@@ -693,19 +809,148 @@ export default function AgenteProdutividade() {
             ↓ Exportar PDF
           </button>
         )}
+        <button className="ap-btn-outline" onClick={() => setHelpOpen(o => !o)}>
+          ? Ajuda
+        </button>
         <button className="ap-btn-outline" onClick={() => setConfigOpen(o => !o)}>
           ⚙ Configuração
         </button>
       </div>
 
+      {/* ── painel de ajuda ── */}
+      {helpOpen && (
+        <div style={{ background: C.navy, color: '#fff', borderBottom: `3px solid ${C.accent}` }}>
+          <div style={{ maxWidth: 1440, margin: '0 auto', padding: '0 28px' }}>
+
+            {/* tabs manual / faq */}
+            <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #ffffff18' }}>
+              {[['manual', 'Manual do Usuário'], ['faq', 'FAQ']].map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setHelpTab(key)}
+                  style={{
+                    background: 'none', border: 'none', borderBottom: `2px solid ${helpTab === key ? C.accent : 'transparent'}`,
+                    color: helpTab === key ? C.accent : '#ffffffaa', padding: '12px 20px', cursor: 'pointer',
+                    fontFamily: 'inherit', fontWeight: 700, fontSize: 13, transition: 'all .15s',
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Manual ── */}
+            {helpTab === 'manual' && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 24, padding: '24px 0 28px' }}>
+
+                <div>
+                  <div style={{ color: C.accent, fontWeight: 800, fontSize: 13, marginBottom: 10, fontFamily: "'Manrope',sans-serif", textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    O que é este sistema?
+                  </div>
+                  <p style={{ fontSize: 13, lineHeight: 1.7, color: '#ffffffcc' }}>
+                    O <strong style={{ color: '#fff' }}>Agente de Produtividade</strong> é uma ferramenta estratégica para gestores e líderes de equipe que integra dados reais do Azure DevOps e os transforma em indicadores de desempenho acionáveis.
+                  </p>
+                  <p style={{ fontSize: 13, lineHeight: 1.7, color: '#ffffffcc', marginTop: 8 }}>
+                    Seu principal objetivo é <strong style={{ color: C.cyanLight }}>identificar gargalos no fluxo de trabalho</strong> — colunas onde os cards ficam parados, sprints com cycle time elevado, ou itens sem progresso — e <strong style={{ color: C.cyanLight }}>auxiliar no direcionamento da equipe</strong>, mostrando quem está sobrecarregado, quem tem baixa atividade e onde concentrar esforços.
+                  </p>
+                </div>
+
+                <div>
+                  <div style={{ color: C.accent, fontWeight: 800, fontSize: 13, marginBottom: 10, fontFamily: "'Manrope',sans-serif", textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Como começar
+                  </div>
+                  {[
+                    ['1', 'Abra Configuração e informe a organização Azure DevOps, seu PAT (Personal Access Token com permissão de leitura) e opcionalmente a chave Anthropic para análise com IA.'],
+                    ['2', 'Clique em Conectar. O sistema carregará projetos, sprints e membros disponíveis.'],
+                    ['3', 'Selecione o projeto, sprint (opcional) e profissional (opcional). Use datas para recortes temporais.'],
+                    ['4', 'Clique em Buscar Dados para carregar os work items e seus históricos de alterações.'],
+                    ['5', 'Navegue pelas abas Dashboard, Board & Fluxo, Work Items e Análise IA para explorar os dados.'],
+                  ].map(([n, text]) => (
+                    <div key={n} style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
+                      <div style={{ width: 20, height: 20, borderRadius: '50%', background: C.accent, color: C.navy, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 800, flexShrink: 0, marginTop: 1 }}>{n}</div>
+                      <p style={{ fontSize: 12, lineHeight: 1.6, color: '#ffffffcc', margin: 0 }}>{text}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div>
+                  <div style={{ color: C.accent, fontWeight: 800, fontSize: 13, marginBottom: 10, fontFamily: "'Manrope',sans-serif", textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Métricas principais
+                  </div>
+                  {[
+                    ['Atividade Detectada (h)', 'Horas únicas em que a pessoa realizou ao menos uma interação no ADO dentro do horário comercial (9h–18h, dias úteis, exceto feriados nacionais). Métrica principal de esforço quando CompletedWork não é preenchido.'],
+                    ['Lead Time', 'Tempo entre a criação do card e sua conclusão. Mede o tempo total de entrega percebido pelo cliente.'],
+                    ['Cycle Time', 'Tempo entre o início efetivo do trabalho e a conclusão. Reflete a velocidade real de execução da equipe.'],
+                    ['Taxa de Interação (inter/h)', 'Interações por hora de atividade detectada. Alta taxa indica uso intenso do ADO; baixa taxa pode indicar trabalho fora da plataforma.'],
+                    ['CompletedWork', 'Horas declaradas manualmente nos cards. Quando preenchido, é a métrica mais precisa de esforço individual.'],
+                  ].map(([label, desc]) => (
+                    <div key={label} style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: C.cyanLight }}>{label}</div>
+                      <div style={{ fontSize: 12, color: '#ffffffaa', lineHeight: 1.5 }}>{desc}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div>
+                  <div style={{ color: C.accent, fontWeight: 800, fontSize: 13, marginBottom: 10, fontFamily: "'Manrope',sans-serif", textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Como usar para gestão
+                  </div>
+                  {[
+                    ['Identificar gargalos', 'Na aba Board & Fluxo, observe colunas com tempo acumulado muito alto. Colunas como "Em revisão" ou "Aguardando aprovação" com horas elevadas indicam onde o fluxo trava.'],
+                    ['Direcionar a equipe', 'Compare Atividade Detectada por profissional. Quem está com baixa atividade pode precisar de suporte ou redirecionamento de tarefas.'],
+                    ['Avaliar sprints', 'Filtre por sprint e compare Cycle Time médio entre sprints para identificar tendências de melhora ou piora de desempenho.'],
+                    ['Análise com IA', 'Na aba Análise IA, gere um relatório executivo automático com achados, riscos e recomendações baseados em todos os dados carregados.'],
+                  ].map(([label, desc]) => (
+                    <div key={label} style={{ marginBottom: 10, padding: '8px 12px', background: '#ffffff0a', borderRadius: 6, borderLeft: `3px solid ${C.accent}` }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', marginBottom: 2 }}>{label}</div>
+                      <div style={{ fontSize: 12, color: '#ffffffaa', lineHeight: 1.5 }}>{desc}</div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+            )}
+
+            {/* ── FAQ ── */}
+            {helpTab === 'faq' && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, padding: '24px 0 28px' }}>
+                {[
+                  ['Por que a Atividade Detectada é menor que as horas reais trabalhadas?',
+                   'A atividade é contada por hora-slot única (ex: se você fez 5 interações às 10h, conta como 1h, não 5h). É um limite inferior conservador — captura presença, não intensidade. Trabalho feito fora do Azure DevOps (código, reuniões, documentos) não aparece.'],
+                  ['Por que ao filtrar por profissional os números mudam?',
+                   'A Atividade Detectada sempre considera todos os cards carregados — assim você vê o total de horas da pessoa, mesmo em cards de colegas. Já Lead Time, Cycle Time e contagem de cards são filtrados pelos cards atribuídos à pessoa selecionada.'],
+                  ['Por que Épicos e Features não aparecem?',
+                   'Épicos e Features são itens macro de backlog que raramente têm trabalho direto registrado. Incluí-los distorceria métricas como Lead Time (ficam abertos por meses). O sistema conta apenas Requirements, User Stories, Tasks e Bugs.'],
+                  ['O CompletedWork sempre aparece zerado. Por quê?',
+                   'CompletedWork é preenchido manualmente no Azure DevOps. Se a equipe não registra horas nos cards, o campo fica vazio. O KPI de CompletedWork só aparece quando ao menos um card tem valor preenchido.'],
+                  ['Como interpretar a divergência entre Atividade e CompletedWork?',
+                   'Divergência alta (ex: +20h não declaradas) significa que a pessoa teve muita atividade detectada mas registrou poucas horas. Pode indicar trabalho não registrado ou interações rápidas sem impacto real. Divergência negativa (CompletedWork maior) é incomum e pode indicar lançamento retroativo.'],
+                  ['O filtro de Sprint não está funcionando. O que fazer?',
+                   'Clique em "Conectar" novamente para recarregar as sprints com o formato correto de path. Se o problema persistir, use o filtro de datas como alternativa para recortar o período da sprint.'],
+                  ['A análise com IA retornou erro. O que verificar?',
+                   'Confirme que a chave Anthropic (sk-ant-...) foi inserida corretamente na tela de Configuração. A chave precisa ter saldo disponível e permissão para o modelo Claude Haiku. Erros 401 indicam chave inválida; erros 429 indicam limite de requisições atingido.'],
+                  ['Posso usar sem a chave Anthropic?',
+                   'Sim. A chave Anthropic é opcional — apenas a aba "Análise IA" depende dela. Todos os dashboards, gráficos, Lead/Cycle Time, atividade detectada e exportação PDF funcionam sem ela.'],
+                ].map(([q, a]) => (
+                  <div key={q} style={{ padding: '14px 16px', background: '#ffffff0a', borderRadius: 8, borderLeft: `3px solid ${C.accent}` }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#fff', marginBottom: 6, lineHeight: 1.4 }}>{q}</div>
+                    <div style={{ fontSize: 12, color: '#ffffffb0', lineHeight: 1.6 }}>{a}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
+
       <div style={{ maxWidth: 1440, margin: '0 auto', padding: '24px 28px' }}>
 
-        {/* ── config panel ── */}
+        {/* ── config panel (credenciais) ── */}
         {configOpen && (
-          <div className="section-card" style={{ marginBottom: 24 }}>
-            <h4 style={{ fontSize: 12, fontWeight: 700, color: C.textDim, marginBottom: 16, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Configuração</h4>
-
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+          <div className="section-card" style={{ marginBottom: 16 }}>
+            <h4 style={{ fontSize: 12, fontWeight: 700, color: C.textDim, marginBottom: 16, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Configuração de Conexão</h4>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ flex: 1, minWidth: 180 }}>
                 <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Organização Azure DevOps</label>
                 <input className="ap-input" placeholder="ex: minha-org" value={azOrg} onChange={e => setAzOrg(e.target.value)} />
@@ -724,45 +969,49 @@ export default function AgenteProdutividade() {
                 </button>
               </div>
             </div>
-
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ flex: 1, minWidth: 160 }}>
-                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Projeto</label>
-                <select className="ap-input" value={azProject} onChange={e => handleProjectChange(e.target.value)}>
-                  <option value="">Selecione o projeto</option>
-                  {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1, minWidth: 160 }}>
-                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Sprint / Iteração</label>
-                <select className="ap-input" value={filterIteration} onChange={e => setFilterIteration(e.target.value)}>
-                  <option value="">Todas as iterações</option>
-                  {iterations.map(it => <option key={it.id} value={it.path}>{it.name}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1, minWidth: 160 }}>
-                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Profissional</label>
-                <select className="ap-input" value={filterMember} onChange={e => setFilterMember(e.target.value)}>
-                  <option value="">Todos</option>
-                  {members.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1, minWidth: 130 }}>
-                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data de</label>
-                <input type="date" className="ap-input" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} />
-              </div>
-              <div style={{ flex: 1, minWidth: 130 }}>
-                <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data até</label>
-                <input type="date" className="ap-input" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} />
-              </div>
-              <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-                <button className="ap-btn" style={{ background: C.accent, color: '#fff' }} onClick={handleFetch} disabled={loading || !azProject}>
-                  {loading ? loadingMsg || 'Carregando…' : '⟳ Buscar Dados'}
-                </button>
-              </div>
-            </div>
           </div>
         )}
+
+        {/* ── filtros (sempre visíveis após conectar) ── */}
+        <div className="section-card" style={{ marginBottom: 24 }}>
+          <h4 style={{ fontSize: 12, fontWeight: 700, color: C.textDim, marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Filtros</h4>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ flex: 2, minWidth: 160 }}>
+              <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Projeto</label>
+              <select className="ap-input" value={azProject} onChange={e => handleProjectChange(e.target.value)}>
+                <option value="">Selecione o projeto</option>
+                {projects.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 2, minWidth: 160 }}>
+              <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Sprint / Iteração</label>
+              <select className="ap-input" value={filterIteration} onChange={e => setFilterIteration(e.target.value)}>
+                <option value="">Todas as iterações</option>
+                {iterations.map(it => <option key={it.id} value={it.path}>{it.name}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 2, minWidth: 160 }}>
+              <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Profissional</label>
+              <select className="ap-input" value={filterMember} onChange={e => setFilterMember(e.target.value)}>
+                <option value="">Todos</option>
+                {members.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1, minWidth: 130 }}>
+              <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data de</label>
+              <input type="date" className="ap-input" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} />
+            </div>
+            <div style={{ flex: 1, minWidth: 130 }}>
+              <label style={{ fontSize: 11, color: C.textDim, display: 'block', marginBottom: 4, fontWeight: 600 }}>Data até</label>
+              <input type="date" className="ap-input" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} />
+            </div>
+            <div>
+              <button className="ap-btn" style={{ background: C.accent, color: '#fff' }} onClick={handleFetch} disabled={loading || !azProject}>
+                {loading ? loadingMsg || 'Carregando…' : '⟳ Buscar Dados'}
+              </button>
+            </div>
+          </div>
+        </div>
 
         {/* error */}
         {error && (
@@ -797,12 +1046,28 @@ export default function AgenteProdutividade() {
               <KpiCard label="Lead Time Médio" value={horasToStr(metrics.avgLeadTime)} sub="criação → conclusão" color={C.amber} />
               <KpiCard label="Cycle Time Médio" value={horasToStr(metrics.avgCycleTime)} sub="início → conclusão" color={C.navyMed} />
               <KpiCard label="Itens em Aberto" value={metrics.totalItems - metrics.completedItems} color={C.coral} />
+              {metrics.anyOriginalEstimate && (
+                <KpiCard
+                  label="Original Estimate Total"
+                  value={horasToStr(metrics.totalOriginalEstimate)}
+                  sub={`${metrics.globalOeCoverage}% dos cards estimados`}
+                  color={C.navyMed}
+                />
+              )}
               {metrics.anyCompletedWork && (
                 <KpiCard
                   label="CompletedWork Total"
                   value={horasToStr(metrics.totalCompletedWork)}
                   sub={`${metrics.globalCwCoverage}% dos cards preenchidos`}
                   color={C.green}
+                />
+              )}
+              {metrics.globalEfficiency !== null && (
+                <KpiCard
+                  label="Eficiência (CW/OE)"
+                  value={`${metrics.globalEfficiency}%`}
+                  sub={metrics.globalEfficiency > 120 ? 'acima da estimativa' : metrics.globalEfficiency >= 80 ? 'dentro da estimativa' : 'abaixo da estimativa'}
+                  color={metrics.globalEfficiency > 120 ? C.coral : metrics.globalEfficiency >= 80 ? C.green : C.amber}
                 />
               )}
             </div>
@@ -884,27 +1149,45 @@ export default function AgenteProdutividade() {
 
                 <div className="section-card">
                   <h4>Índice de Interação por Profissional</h4>
+                  <div style={{ fontSize: 11, color: C.textDim, marginBottom: 8 }}>
+                    Interações por hora de atividade detectada — normalizado para não contradizer o volume total.
+                    Calculado sobre todos os cards, não apenas os atribuídos.
+                  </div>
                   <ResponsiveContainer width="100%" height={240}>
-                    <RadarChart data={Object.entries(metrics.interByPerson).map(([name, v]) => ({ name: name.split(' ')[0], interacoes: v }))}>
+                    <RadarChart data={metrics.interactionRate}>
                       <PolarGrid stroke={C.border} />
                       <PolarAngleAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
                       <PolarRadiusAxis tick={{ fill: C.muted, fontSize: 9 }} />
-                      <Radar name="Interações" dataKey="interacoes" stroke={C.accent} fill={C.accent} fillOpacity={0.2} />
-                      <Tooltip content={<CustomTooltip />} />
+                      <Radar name="Interações/h" dataKey="taxa" stroke={C.accent} fill={C.accent} fillOpacity={0.2} />
+                      <Tooltip
+                        content={({ active, payload }) => {
+                          if (!active || !payload?.length) return null;
+                          const d = payload[0]?.payload;
+                          return (
+                            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 7, padding: '10px 14px', fontSize: 12, boxShadow: '0 2px 8px #00366C0e' }}>
+                              <div style={{ fontWeight: 700, color: C.textBright, marginBottom: 4 }}>{d?.fullName}</div>
+                              <div style={{ color: C.accent }}>Taxa: <strong>{d?.taxa} inter/h</strong></div>
+                              <div style={{ color: C.muted }}>Total interações: {d?.interacoes}</div>
+                              <div style={{ color: C.muted }}>Atividade: {d?.atividade}h</div>
+                            </div>
+                          );
+                        }}
+                      />
                     </RadarChart>
                   </ResponsiveContainer>
                 </div>
 
-                {/* ── Atividade vs CompletedWork ── */}
+                {/* ── Planejado × Realizado × Atividade ── */}
                 <div className="section-card" style={{ gridColumn: '1 / -1' }}>
-                  <h4>Atividade Detectada vs. CompletedWork por Profissional</h4>
+                  <h4>Planejado × Realizado × Atividade por Profissional</h4>
                   <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12, lineHeight: 1.6 }}>
-                    <strong style={{ color: C.navyMed }}>Atividade Detectada</strong> = horas únicas com ao menos uma interação no ADO em horário comercial — métrica principal de esforço quando CompletedWork não é preenchido.
+                    <strong style={{ color: C.green }}>Original Estimate</strong> = horas planejadas no Azure DevOps (campo estimativa original).{' '}
                     {metrics.anyCompletedWork
-                      ? <> <strong style={{ color: C.accent }}>CompletedWork</strong> = horas declaradas manualmente. Divergência {'>'} 8h pode indicar trabalho não registrado.</>
-                      : <span style={{ color: C.amber }}> CompletedWork não preenchido pela equipe — coluna exibe "—".</span>}
+                      ? <><strong style={{ color: C.accent }}>CompletedWork</strong> = horas realizadas declaradas manualmente.{' '}</>
+                      : <span style={{ color: C.amber }}>CompletedWork não preenchido — exibe "—".{' '}</span>}
+                    <strong style={{ color: C.navyMed }}>Atividade Detectada</strong> = horas únicas com interação no ADO em horário comercial.
                   </div>
-                  <ResponsiveContainer width="100%" height={260}>
+                  <ResponsiveContainer width="100%" height={280}>
                     <BarChart data={metrics.activityVsCw} barGap={4}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                       <XAxis dataKey="name" tick={{ fill: C.textDim, fontSize: 11 }} />
@@ -919,23 +1202,37 @@ export default function AgenteProdutividade() {
                               {payload.map((p, i) => (
                                 <div key={i} style={{ color: p.color }}>{p.name}: <strong>{p.value}h</strong></div>
                               ))}
-                              {d && <div style={{ color: C.muted, marginTop: 4 }}>Cobertura CW: {d.cobertura}%</div>}
+                              {d?.eficiencia !== null && d?.eficiencia !== undefined && (
+                                <div style={{ color: d.eficiencia > 120 ? C.coral : d.eficiencia >= 80 ? C.green : C.amber, marginTop: 4, fontWeight: 700 }}>
+                                  Eficiência: {d.eficiencia}%
+                                </div>
+                              )}
                             </div>
                           );
                         }}
                       />
                       <Legend wrapperStyle={{ fontSize: 11, color: C.textDim }} />
-                      <Bar dataKey="atividade" name="Atividade Detectada (h)" fill={C.navyMed} radius={[4, 4, 0, 0]} />
+                      {metrics.anyOriginalEstimate && (
+                        <Bar dataKey="originalEstimate" name="Original Estimate (h)" fill={C.green} radius={[4, 4, 0, 0]} />
+                      )}
                       <Bar dataKey="completedWork" name="CompletedWork (h)" fill={C.accent} radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="atividade" name="Atividade Detectada (h)" fill={C.navyMed} radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
 
-                  {/* tabela de cobertura */}
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginTop: 16 }}>
+                  {/* tabela planejado × realizado */}
+                  <div style={{ overflowX: 'auto', marginTop: 16 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
                       <tr style={{ background: C.sectionBg }}>
-                        {['Profissional', 'Atividade (h)', 'CompletedWork (h)', 'Cards c/ CW', 'Cobertura', 'Divergência'].map(h => (
-                          <th key={h} style={{ padding: '7px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                        {[
+                          'Profissional', 'Atividade (h)',
+                          ...(metrics.anyOriginalEstimate ? ['Estimado (h)', 'Cob. OE'] : []),
+                          'CompletedWork (h)', 'Cob. CW',
+                          ...(metrics.anyOriginalEstimate && metrics.anyCompletedWork ? ['Eficiência'] : []),
+                          'Divergência',
+                        ].map(h => (
+                          <th key={h} style={{ padding: '7px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
@@ -943,20 +1240,48 @@ export default function AgenteProdutividade() {
                       {metrics.activityVsCw.map(row => {
                         const div = row.atividade - row.completedWork;
                         const cov = metrics.cwCoverage[row.fullName] || { filled: 0, total: 0 };
+                        const covOe = metrics.oeCoverage[row.fullName] || { filled: 0, total: 0 };
                         return (
                           <tr key={row.fullName} className="wi-row" style={{ borderBottom: `1px solid ${C.border}` }}>
                             <td style={{ padding: '7px 12px', color: C.textBright, fontWeight: 600 }}>{row.fullName}</td>
                             <td style={{ padding: '7px 12px', color: C.navyMed, fontWeight: 700 }}>{row.atividade}h</td>
+                            {metrics.anyOriginalEstimate && (
+                              <td style={{ padding: '7px 12px', color: C.green, fontWeight: row.originalEstimate > 0 ? 700 : 400 }}>
+                                {row.originalEstimate > 0 ? `${row.originalEstimate}h` : '—'}
+                              </td>
+                            )}
+                            {metrics.anyOriginalEstimate && (
+                              <td style={{ padding: '7px 12px' }}>
+                                {(row.atividade === 0 && row.completedWork === 0)
+                                  ? <span style={{ color: C.muted }}>—</span>
+                                  : (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                      <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: 'hidden', minWidth: 50 }}>
+                                        <div style={{ width: `${row.coberturaOe}%`, height: '100%', background: row.coberturaOe >= 70 ? C.green : row.coberturaOe >= 40 ? C.amber : C.coral, borderRadius: 3 }} />
+                                      </div>
+                                      <span style={{ color: row.coberturaOe >= 70 ? C.green : row.coberturaOe >= 40 ? C.amber : C.coral, fontWeight: 700, fontSize: 11 }}>{row.coberturaOe}%</span>
+                                    </div>
+                                  )}
+                              </td>
+                            )}
                             <td style={{ padding: '7px 12px', color: C.accent }}>{row.completedWork > 0 ? `${row.completedWork}h` : '—'}</td>
-                            <td style={{ padding: '7px 12px', color: C.text }}>{cov.filled}/{cov.total}</td>
                             <td style={{ padding: '7px 12px' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: 'hidden', minWidth: 60 }}>
+                                <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: 'hidden', minWidth: 50 }}>
                                   <div style={{ width: `${row.cobertura}%`, height: '100%', background: row.cobertura >= 70 ? C.green : row.cobertura >= 40 ? C.amber : C.coral, borderRadius: 3 }} />
                                 </div>
                                 <span style={{ color: row.cobertura >= 70 ? C.green : row.cobertura >= 40 ? C.amber : C.coral, fontWeight: 700, fontSize: 11 }}>{row.cobertura}%</span>
                               </div>
                             </td>
+                            {metrics.anyOriginalEstimate && metrics.anyCompletedWork && (
+                              <td style={{ padding: '7px 12px' }}>
+                                {row.eficiencia !== null ? (
+                                  <span style={{ color: row.eficiencia > 120 ? C.coral : row.eficiencia >= 80 ? C.green : C.amber, fontWeight: 700 }}>
+                                    {row.eficiencia}%
+                                  </span>
+                                ) : '—'}
+                              </td>
+                            )}
                             <td style={{ padding: '7px 12px', color: div > 8 ? C.amber : C.muted, fontWeight: div > 8 ? 700 : 400 }}>
                               {row.completedWork > 0 ? (div > 0 ? `+${div}h não declaradas` : div < 0 ? `${Math.abs(div)}h acima da atividade` : '✓ coerente') : '—'}
                             </td>
@@ -965,6 +1290,7 @@ export default function AgenteProdutividade() {
                       })}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               </div>
             )}
@@ -1034,7 +1360,7 @@ export default function AgenteProdutividade() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
                       <tr style={{ background: C.sectionBg }}>
-                        {['ID', 'Título', 'Tipo', 'Estado', 'Responsável', 'Criado', 'Fechado', 'Lead Time', 'Cycle Time', 'Horas Úteis'].map(h => (
+                        {['ID', 'Título', 'Tipo', 'Estado', 'Responsável', 'Criado', 'Fechado', 'Lead Time', 'Cycle Time', 'Estimado (OE)', 'CompletedWork'].map(h => (
                           <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: C.textDim, fontWeight: 700, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                         ))}
                       </tr>
@@ -1058,7 +1384,12 @@ export default function AgenteProdutividade() {
                             <td style={{ padding: '7px 12px', color: C.muted, whiteSpace: 'nowrap' }}>{fmtDate(wi.fields?.['Microsoft.VSTS.Common.ClosedDate'])}</td>
                             <td style={{ padding: '7px 12px', color: C.text }}>{m.leadTime > 0 ? horasToStr(m.leadTime) : '—'}</td>
                             <td style={{ padding: '7px 12px', color: C.text }}>{m.cycleTime > 0 ? horasToStr(m.cycleTime) : '—'}</td>
-                            <td style={{ padding: '7px 12px', color: C.text }}>{m.completedWork > 0 ? horasToStr(m.completedWork) : '—'}</td>
+                            <td style={{ padding: '7px 12px', color: m.originalEstimate > 0 ? C.green : C.muted, fontWeight: m.originalEstimate > 0 ? 600 : 400 }}>
+                              {m.originalEstimate > 0 ? horasToStr(m.originalEstimate) : '—'}
+                            </td>
+                            <td style={{ padding: '7px 12px', color: m.completedWork > 0 ? C.accent : C.muted }}>
+                              {m.completedWork > 0 ? horasToStr(m.completedWork) : '—'}
+                            </td>
                           </tr>
                         );
                       })}
@@ -1090,11 +1421,32 @@ export default function AgenteProdutividade() {
         {/* empty state */}
         {!metrics && !loading && (
           <div style={{ background: '#FFFFFF', border: '1px solid #E8ECF5', borderRadius: 8, padding: '60px 28px', textAlign: 'center' }}>
-            <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'linear-gradient(135deg, #00366C, #39ADE3)', margin: '0 auto 16px' }} />
+            <img src="/ytecnologia.png" alt="Y Tecnologia" style={{ height: 48, width: 'auto', margin: '0 auto 16px', display: 'block' }} />
             <div style={{ fontFamily: "'Manrope',sans-serif", fontWeight: 700, fontSize: 16, color: C.textBright, marginBottom: 6 }}>Agente de Produtividade</div>
             <div style={{ fontSize: 13, color: C.textDim }}>Configure a conexão com o Azure DevOps e clique em <strong>Buscar Dados</strong> para iniciar a análise.</div>
           </div>
         )}
+
+        {/* ── legenda de colunas ── */}
+        <div style={{ marginTop: 32, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 10, color: C.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Legenda</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 24px' }}>
+            {[
+              ['Atividade (h)', 'Horas únicas com ao menos uma interação no Azure DevOps dentro do horário comercial (9h–18h, dias úteis).'],
+              ['Estimado (h)', 'Original Estimate — horas planejadas registradas no Azure DevOps antes do início da tarefa.'],
+              ['Cob. OE', 'Cobertura de Original Estimate — percentual de cards com estimativa original preenchida.'],
+              ['CompletedWork (h)', 'Horas de trabalho realizadas declaradas manualmente nos cards do Azure DevOps.'],
+              ['Cob. CW', 'Cobertura de CompletedWork — percentual de cards com horas realizadas preenchidas.'],
+              ['Eficiência', 'CompletedWork ÷ Original Estimate × 100. Acima de 120% indica estouro de estimativa; abaixo de 80% indica subregistro ou superestimativa.'],
+              ['Divergência', 'Diferença entre Atividade Detectada e CompletedWork. Valores altos indicam trabalho não declarado nos cards.'],
+            ].map(([term, def]) => (
+              <div key={term} style={{ display: 'flex', gap: 5, alignItems: 'baseline', minWidth: 260, maxWidth: 420 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: C.textDim, whiteSpace: 'nowrap' }}>{term}:</span>
+                <span style={{ fontSize: 10, color: C.muted, lineHeight: 1.5 }}>{def}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
